@@ -48,7 +48,7 @@ if not DATABASE_URL:
 db_pool_lock = threading.Lock()
 
 try:
-    db_pool = psycopg2.pool.ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
+    db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
     print("✅ PostgreSQL Connection Pool initialized.")
 except Exception as e:
     print(f"❌ Failed to connect: {e}")
@@ -71,7 +71,7 @@ def get_safe_connection():
                     db_pool.closeall()
                 except Exception:
                     pass
-                db_pool = psycopg2.pool.ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
+                db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
     raise last_err
 
 def put_conn(conn):
@@ -100,6 +100,7 @@ def init_db():
                                 telebirr TEXT,
                                 cbebirr TEXT,
                                 is_active INTEGER DEFAULT 1,
+                                is_approved INTEGER DEFAULT 0,
                                 shop_lat REAL,
                                 shop_lng REAL,
                                 area_text TEXT,
@@ -129,7 +130,8 @@ def init_db():
                                 status_en TEXT,
                                 total_price REAL,
                                 delivery_fee REAL DEFAULT 0,
-                                status_stage INTEGER DEFAULT 0)''')
+                                status_stage INTEGER DEFAULT 0,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_langs (
                                 chat_id BIGINT PRIMARY KEY,
@@ -320,6 +322,24 @@ def get_back_button(lang):
 # ============================================================
 # 5. SHOP BOT ENGINE
 # ============================================================
+running_tokens = set()
+running_lock = threading.Lock()
+
+def start_shop_bot(token):
+    with running_lock:
+        if token in running_tokens:
+            return False
+        running_tokens.add(token)
+    print(f"🚀 Starting shop bot: {token[:10]}...")
+    try:
+        setup_bot_handlers(token)
+        return True
+    except Exception as e:
+        print(f"❌ Failed to start bot {token[:10]}: {e}")
+        with running_lock:
+            running_tokens.discard(token)
+        return False
+
 def setup_bot_handlers(token):
     bot = telebot.TeleBot(token)
 
@@ -334,7 +354,7 @@ def setup_bot_handlers(token):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute('''SELECT store_name, admin_id, username, telebirr, is_active, password_hash, password_salt,
+                cursor.execute('''SELECT store_name, admin_id, username, telebirr, is_active, is_approved, password_hash, password_salt,
                                   cbebirr, area_text, shop_photo, shop_description, shop_lat, shop_lng,
                                   bank_name, bank_account
                                   FROM stores WHERE token=%s''', (token,))
@@ -344,10 +364,10 @@ def setup_bot_handlers(token):
         if row:
             return {
                 "store_name": row[0], "admin_id": row[1], "username": row[2], "telebirr": row[3], 
-                "is_active": row[4], "pass_hash": row[5], "salt": row[6],
-                "cbebirr": row[7], "area_text": row[8], "shop_photo": row[9], 
-                "shop_description": row[10], "shop_lat": row[11], "shop_lng": row[12],
-                "bank_name": row[13], "bank_account": row[14]
+                "is_active": row[4], "is_approved": row[5], "pass_hash": row[6], "salt": row[7],
+                "cbebirr": row[8], "area_text": row[9], "shop_photo": row[10], 
+                "shop_description": row[11], "shop_lat": row[12], "shop_lng": row[13],
+                "bank_name": row[14], "bank_account": row[15]
             }
         return None
 
@@ -355,6 +375,9 @@ def setup_bot_handlers(token):
         store = get_store_info()
         if not store:
             bot.send_message(chat_id, "🏪 ይህ ሱቅ ገና አልተመዘገበም።")
+            return False
+        if store.get("is_approved", 0) != 1:
+            bot.send_message(chat_id, "⏳ ይህ ሱቅ ገና አልጸደቀም። እባክዎ ይጠብቁ።")
             return False
         if not store["is_active"]:
             bot.send_message(chat_id, "❌ ይህ ሱቅ ንቁ አይደለም።")
@@ -390,7 +413,7 @@ def setup_bot_handlers(token):
         def __init__(self, token):
             self.token = token
         
-        def search(self, query=None, min_price=None, max_price=None, category=None, location=None, lat=None, lng=None):
+        def search(self, query=None, min_price=None, max_price=None, category=None):
             conn = get_safe_connection()
             try:
                 with conn.cursor() as cursor:
@@ -565,6 +588,10 @@ def setup_bot_handlers(token):
         if not store:
             bot.reply_to(message, "❌ ይህ ሱቅ ገና አልተመዘገበም። በControl Bot ይመዝገቡ!")
             return
+        
+        if store.get("is_approved", 0) != 1:
+            bot.reply_to(message, "⏳ ይህ ሱቅ ገና አልጸደቀም። እባክዎ ይጠብቁ።")
+            return
 
         attempt_key = (token, chat_id)
         attempt = login_attempts.setdefault(attempt_key, {"count": 0, "lockout_until": 0})
@@ -705,7 +732,6 @@ def setup_bot_handlers(token):
             return
         bank_input = message.text.strip()
         
-        # Check if it's a number
         if bank_input.isdigit():
             idx = int(bank_input) - 1
             if 0 <= idx < len(ETHIOPIAN_BANKS):
@@ -1652,44 +1678,28 @@ def setup_bot_handlers(token):
     threading.Thread(target=_run_bot, name=f"Bot_{token[:10]}", daemon=True).start()
 
 # ============================================================
-# 6. CONTROL BOT
+# 6. LOAD EXISTING STORES
 # ============================================================
-running_tokens = set()
-running_lock = threading.Lock()
-
-def start_shop_bot(token):
-    with running_lock:
-        if token in running_tokens:
-            return False
-        running_tokens.add(token)
-    print(f"🚀 Starting shop bot: {token[:10]}...")
-    try:
-        setup_bot_handlers(token)
-    except Exception as e:
-        print(f"❌ Failed to start bot {token[:10]}: {e}")
-        with running_lock:
-            running_tokens.discard(token)
-        return False
-    return True
-
 def load_existing_stores_from_db():
     conn = get_safe_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT token FROM stores")
+            cursor.execute("SELECT token FROM stores WHERE is_approved = 1")
             rows = cursor.fetchall()
     finally:
         put_conn(conn)
     for (tok,) in rows:
         start_shop_bot(tok)
-    print(f"✅ {len(rows)} stores restored.")
+    print(f"✅ {len(rows)} approved stores restored.")
 
 load_existing_stores_from_db()
 
 # ============================================================
-# 7. CONTROL BOT - MAIN
+# 7. CONTROL BOT WITH SUPER ADMIN PANEL
 # ============================================================
 CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
+SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
+SUPER_ADMIN_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD")
 
 if CONTROL_BOT_TOKEN:
     control_bot = telebot.TeleBot(CONTROL_BOT_TOKEN)
@@ -1698,6 +1708,591 @@ if CONTROL_BOT_TOKEN:
     except Exception:
         pass
 
+    super_admin_sessions = {}
+    super_login_attempts = {}
+    reg_states = {}
+
+    def is_super_admin(chat_id):
+        return chat_id in super_admin_sessions and time.time() < super_admin_sessions[chat_id]
+
+    # ============================================================
+    # 7.1 DASHBOARD FUNCTIONS
+    # ============================================================
+    
+    def render_dashboard_text():
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_approved=0")
+                pending = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_active=1 AND is_approved=1")
+                active = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores")
+                total = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '24 hours'")
+                today_orders = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM orders")
+                total_orders = cursor.fetchone()[0]
+                cursor.execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1")
+                revenue = cursor.fetchone()[0]
+        finally:
+            put_conn(conn)
+        return (
+            "🎛 **Super Admin Dashboard**\n\n"
+            f"🏪 Total stores: **{total}**\n"
+            f"⏳ Pending approval: **{pending}**\n"
+            f"🟢 Active stores: **{active}**\n"
+            f"🧾 Orders (24h): **{today_orders}**\n"
+            f"📦 Total orders: **{total_orders}**\n"
+            f"💰 Revenue: **{revenue:,.2f} ETB**\n\n"
+            "Choose an action below 👇"
+        )
+
+    def get_dashboard_markup():
+        m = types.InlineKeyboardMarkup(row_width=2)
+        m.add(
+            types.InlineKeyboardButton("⏳ Pending Stores", callback_data="dash_pending"),
+            types.InlineKeyboardButton("🏢 All Stores", callback_data="dash_all"),
+            types.InlineKeyboardButton("📊 Stats", callback_data="dash_stats"),
+            types.InlineKeyboardButton("📢 Broadcast", callback_data="dash_broadcast"),
+            types.InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
+            types.InlineKeyboardButton("🔙 Back to Menu", callback_data="dash_back")
+        )
+        return m
+
+    # ============================================================
+    # 7.2 SUPER ADMIN LOGIN
+    # ============================================================
+    @control_bot.message_handler(commands=['superadmin'])
+    def super_auth_start(message):
+        chat_id = message.chat.id
+        if not SUPER_ADMIN_PASSWORD:
+            control_bot.reply_to(message, "❌ SUPER_ADMIN_PASSWORD not set!")
+            return
+        if SUPER_ADMIN_ID != 0 and chat_id != SUPER_ADMIN_ID:
+            control_bot.reply_to(message, "❌ መብት የለዎትም!")
+            return
+
+        attempt = super_login_attempts.setdefault(chat_id, {"count": 0, "lockout_until": 0})
+        if time.time() < attempt["lockout_until"]:
+            remaining = int(attempt["lockout_until"] - time.time())
+            control_bot.reply_to(message, f"🔒 እገዳ ላይ ነዎት! ከ {remaining} ሰከንድ በኋላ ይሞክሩ።")
+            return
+
+        msg = control_bot.send_message(chat_id, "🔐 **እባክዎ የ Super Admin የይለፍ ቃል ያስገቡ፦**", parse_mode="Markdown")
+        control_bot.register_next_step_handler(msg, process_super_pass)
+
+    def process_super_pass(message):
+        chat_id = message.chat.id
+        attempt = super_login_attempts.setdefault(chat_id, {"count": 0, "lockout_until": 0})
+
+        if message.text == SUPER_ADMIN_PASSWORD:
+            super_admin_sessions[chat_id] = time.time() + 7200
+            super_login_attempts[chat_id] = {"count": 0, "lockout_until": 0}
+            
+            control_bot.send_message(
+                chat_id,
+                "🔓 **እንኳን ወደ Super Admin ፓነል በደህና መጡ!** (የ2 ሰዓት ሴሽን)",
+                parse_mode="Markdown"
+            )
+            
+            control_bot.send_message(
+                chat_id,
+                render_dashboard_text(),
+                reply_markup=get_dashboard_markup(),
+                parse_mode="Markdown"
+            )
+        else:
+            attempt["count"] += 1
+            if attempt["count"] >= 5:
+                attempt["lockout_until"] = time.time() + 900
+                control_bot.send_message(chat_id, "❌ 5 ጊዜ ተሳስተዋል። ለ15 ደቂቃ ታግደዋል።")
+            else:
+                left = 5 - attempt["count"]
+                control_bot.send_message(chat_id, f"❌ የተሳሳተ የይለፍ ቃል! {left} ሙከራዎች ቀርተውዎታል።")
+
+    # ============================================================
+    # 7.3 DASHBOARD PANEL - /panel COMMAND
+    # ============================================================
+    @control_bot.message_handler(commands=['panel'])
+    def open_dashboard(message):
+        chat_id = message.chat.id
+        if not is_super_admin(chat_id):
+            control_bot.reply_to(message, "❌ /superadmin በማድረግ መጀመሪያ ይግቡ።")
+            return
+        control_bot.send_message(
+            chat_id,
+            render_dashboard_text(),
+            reply_markup=get_dashboard_markup(),
+            parse_mode="Markdown"
+        )
+
+    # ============================================================
+    # 7.4 DASHBOARD CALLBACK HANDLER
+    # ============================================================
+    @control_bot.callback_query_handler(func=lambda call: call.data.startswith("dash_"))
+    def dashboard_router(call):
+        chat_id = call.message.chat.id
+        if not is_super_admin(chat_id):
+            control_bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+            return
+        
+        action = call.data.split("_")[1]
+        
+        if action == "refresh":
+            control_bot.edit_message_text(
+                render_dashboard_text(),
+                chat_id,
+                call.message.message_id,
+                reply_markup=get_dashboard_markup(),
+                parse_mode="Markdown"
+            )
+            control_bot.answer_callback_query(call.id, "🔄 Refreshed!")
+        
+        elif action == "pending":
+            control_bot.answer_callback_query(call.id)
+            show_pending_stores(call.message)
+        
+        elif action == "all":
+            control_bot.answer_callback_query(call.id)
+            show_all_stores(call.message)
+        
+        elif action == "stats":
+            control_bot.answer_callback_query(call.id)
+            show_system_stats(call.message)
+        
+        elif action == "broadcast":
+            control_bot.answer_callback_query(call.id)
+            broadcast_menu(call.message)
+        
+        elif action == "back":
+            control_bot.answer_callback_query(call.id)
+            try:
+                control_bot.delete_message(chat_id, call.message.message_id)
+            except:
+                pass
+            control_bot.send_message(
+                chat_id,
+                render_dashboard_text(),
+                reply_markup=get_dashboard_markup(),
+                parse_mode="Markdown"
+            )
+
+    # ============================================================
+    # 7.5 PENDING STORES APPROVAL
+    # ============================================================
+    def show_pending_stores(message):
+        chat_id = message.chat.id
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("""SELECT id, store_name, username, area_text, shop_description, created_at, admin_id, token 
+                                  FROM stores WHERE is_approved = 0 AND is_active = 1 ORDER BY created_at DESC""")
+                stores = cursor.fetchall()
+        finally:
+            put_conn(conn)
+        
+        if not stores:
+            control_bot.send_message(chat_id, "✅ ምንም ያልተጸደቁ ሱቆች የሉም!", reply_markup=get_dashboard_markup())
+            return
+        
+        for store in stores:
+            store_id, name, username, area, desc, created, admin_id, token = store
+            text = f"🏪 **{name}**\n"
+            text += f"🆔 #{store_id}\n"
+            text += f"👤 @{username if username else 'ስም'}\n"
+            text += f"📍 {area if area else 'አልተዘጋጀም'}\n"
+            text += f"📝 {desc[:50] if desc else ''}...\n"
+            text += f"📅 {created.strftime('%Y-%m-%d %H:%M')}\n"
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(
+                types.InlineKeyboardButton("✅ አጽድቅ", callback_data=f"sapprove_{store_id}"),
+                types.InlineKeyboardButton("❌ ውድቅ አድርግ", callback_data=f"sreject_{store_id}"),
+                types.InlineKeyboardButton("🔙 Back", callback_data="dash_back")
+            )
+            control_bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+    @control_bot.callback_query_handler(func=lambda call: call.data.startswith("sapprove_"))
+    def super_approve_store(call):
+        chat_id = call.message.chat.id
+        if not is_super_admin(chat_id):
+            control_bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+            return
+        
+        store_id = int(call.data.split("_")[1])
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT token, store_name, admin_id FROM stores WHERE id=%s", (store_id,))
+                store = cursor.fetchone()
+                if store:
+                    token, name, admin_id = store
+                    cursor.execute("UPDATE stores SET is_approved = 1 WHERE id=%s", (store_id,))
+                    conn.commit()
+                    
+                    start_shop_bot(token)
+                    
+                    try:
+                        control_bot.send_message(
+                            admin_id,
+                            f"🎉 **ሱቅዎ ተጸድቋል!**\n\n"
+                            f"🏪 {name}\n"
+                            f"🔑 አሁን /login [የይለፍ_ቃል] በማድረግ መግባት ይችላሉ"
+                        )
+                    except:
+                        pass
+                    
+                    control_bot.edit_message_text(
+                        f"✅ ሱቅ #{store_id} ተጸድቋል!\n🏪 {name}",
+                        chat_id, call.message.message_id
+                    )
+                    control_bot.answer_callback_query(call.id, "ተጸድቋል!")
+                    
+                    control_bot.send_message(
+                        chat_id,
+                        render_dashboard_text(),
+                        reply_markup=get_dashboard_markup(),
+                        parse_mode="Markdown"
+                    )
+        finally:
+            put_conn(conn)
+
+    @control_bot.callback_query_handler(func=lambda call: call.data.startswith("sreject_"))
+    def super_reject_store(call):
+        chat_id = call.message.chat.id
+        if not is_super_admin(chat_id):
+            control_bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+            return
+        
+        store_id = int(call.data.split("_")[1])
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT store_name, admin_id FROM stores WHERE id=%s", (store_id,))
+                store = cursor.fetchone()
+                if store:
+                    name, admin_id = store
+                    cursor.execute("DELETE FROM stores WHERE id=%s", (store_id,))
+                    conn.commit()
+                    
+                    try:
+                        control_bot.send_message(
+                            admin_id,
+                            f"❌ ሱቅዎ **{name}** ውድቅ ተደርጓል።"
+                        )
+                    except:
+                        pass
+                    
+                    control_bot.edit_message_text(
+                        f"❌ ሱቅ #{store_id} ውድቅ ተደርጓል!\n🏪 {name}",
+                        chat_id, call.message.message_id
+                    )
+                    control_bot.answer_callback_query(call.id, "ውድቅ ተደርጓል!")
+                    
+                    control_bot.send_message(
+                        chat_id,
+                        render_dashboard_text(),
+                        reply_markup=get_dashboard_markup(),
+                        parse_mode="Markdown"
+                    )
+        finally:
+            put_conn(conn)
+
+    # ============================================================
+    # 7.6 ALL STORES MANAGEMENT
+    # ============================================================
+    def show_all_stores(message):
+        chat_id = message.chat.id
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("""SELECT id, store_name, username, is_active, is_approved, created_at 
+                                  FROM stores ORDER BY created_at DESC LIMIT 20""")
+                stores = cursor.fetchall()
+        finally:
+            put_conn(conn)
+        
+        if not stores:
+            control_bot.send_message(chat_id, "📜 ምንም ሱቅ የለም!", reply_markup=get_dashboard_markup())
+            return
+        
+        text = "🏢 **ሁሉም ሱቆች**\n\n"
+        for store in stores:
+            store_id, name, username, is_active, is_approved, created = store
+            status = "🟢" if is_active == 1 else "🔴"
+            approved = "✅" if is_approved == 1 else "⏳"
+            text += f"{status} {approved} **{name}**\n"
+            text += f"  🆔 #{store_id} | 👤 @{username if username else 'ስም'}\n"
+            text += f"  📅 {created.strftime('%Y-%m-%d')}\n\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("🔴 ሱቅ አግድ", callback_data="sblock_menu"),
+            types.InlineKeyboardButton("🟢 ሱቅ አንቃ", callback_data="sunblock_menu"),
+            types.InlineKeyboardButton("🗑️ ሱቅ ሰርዝ", callback_data="sdelete_menu"),
+            types.InlineKeyboardButton("🔙 Back", callback_data="dash_back")
+        )
+        control_bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+    @control_bot.callback_query_handler(func=lambda call: call.data in ["sblock_menu", "sunblock_menu", "sdelete_menu"])
+    def store_management_menu(call):
+        chat_id = call.message.chat.id
+        if not is_super_admin(chat_id):
+            control_bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+            return
+        
+        action = call.data.split("_")[0]
+        action_text = {
+            "sblock": "🔴 ለማገድ የሱቅ ቁጥር ያስገቡ:",
+            "sunblock": "🟢 ለማንቃት የሱቅ ቁጥር ያስገቡ:",
+            "sdelete": "🗑️ ለመሰረዝ የሱቅ ቁጥር ያስገቡ:"
+        }
+        
+        msg = control_bot.send_message(chat_id, action_text.get(action, "የሱቅ ቁጥር ያስገቡ:"))
+        control_bot.register_next_step_handler(msg, lambda m: process_store_action(m, action))
+
+    def process_store_action(message, action):
+        chat_id = message.chat.id
+        if not is_super_admin(chat_id):
+            return
+        
+        try:
+            store_id = int(message.text.strip())
+        except:
+            control_bot.reply_to(message, "❌ የተሳሳተ ቁጥር!")
+            return
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT store_name, token, admin_id FROM stores WHERE id=%s", (store_id,))
+                store = cursor.fetchone()
+                if not store:
+                    control_bot.reply_to(message, "❌ ሱቅ አልተገኘም!")
+                    return
+                
+                name, token, admin_id = store
+                
+                if action == "sblock":
+                    cursor.execute("UPDATE stores SET is_active = 0 WHERE id=%s", (store_id,))
+                    action_text = f"🔴 ሱቅ **{name}** ተግዷል!"
+                    try:
+                        control_bot.send_message(admin_id, f"🔴 ሱቅዎ **{name}** ተግዷል!")
+                    except:
+                        pass
+                elif action == "sunblock":
+                    cursor.execute("UPDATE stores SET is_active = 1 WHERE id=%s", (store_id,))
+                    action_text = f"🟢 ሱቅ **{name}** ተነቅቷል!"
+                    try:
+                        control_bot.send_message(admin_id, f"🟢 ሱቅዎ **{name}** ተነቅቷል!")
+                    except:
+                        pass
+                elif action == "sdelete":
+                    cursor.execute("DELETE FROM products WHERE token=%s", (token,))
+                    cursor.execute("DELETE FROM orders WHERE token=%s", (token,))
+                    cursor.execute("DELETE FROM stores WHERE id=%s", (store_id,))
+                    action_text = f"🗑️ ሱቅ **{name}** ተሰርዟል!"
+                    try:
+                        control_bot.send_message(admin_id, f"🗑️ ሱቅዎ **{name}** ተሰርዟል!")
+                    except:
+                        pass
+                
+                conn.commit()
+                control_bot.reply_to(message, f"✅ {action_text}")
+                
+                control_bot.send_message(
+                    chat_id,
+                    render_dashboard_text(),
+                    reply_markup=get_dashboard_markup(),
+                    parse_mode="Markdown"
+                )
+        finally:
+            put_conn(conn)
+
+    # ============================================================
+    # 7.7 SYSTEM STATS
+    # ============================================================
+    def show_system_stats(message):
+        chat_id = message.chat.id
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM stores")
+                total_stores = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_active = 1 AND is_approved = 1")
+                active_stores = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_approved = 0")
+                pending_stores = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM products")
+                total_products = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM orders")
+                total_orders = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1")
+                total_revenue = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(DISTINCT customer_id) FROM orders")
+                active_users = cursor.fetchone()[0]
+                
+                cursor.execute("""SELECT status_stage, COUNT(*) FROM orders GROUP BY status_stage""")
+                orders_by_stage = cursor.fetchall()
+                
+                cursor.execute("""SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '7 days'""")
+                recent_orders = cursor.fetchone()[0]
+        finally:
+            put_conn(conn)
+        
+        stage_names = ["🟡 በመጠባበቅ ላይ", "✅ ተረጋግጧል", "🚚 በመንገድ ላይ", "📦 ደርሷል", "❌ ውድቅ"]
+        
+        text = "📊 **የሲስተም ስታቲስቲክስ**\n\n"
+        text += f"🏪 **ሱቆች**\n"
+        text += f"  • ጠቅላላ: {total_stores}\n"
+        text += f"  • ንቁ: {active_stores}\n"
+        text += f"  • ያልተጸደቀ: {pending_stores}\n\n"
+        text += f"📦 **ምርቶች:** {total_products}\n\n"
+        text += f"🧾 **ትዕዛዞች**\n"
+        text += f"  • ጠቅላላ: {total_orders}\n"
+        text += f"  • የቅርብ 7 ቀናት: {recent_orders}\n"
+        text += f"  • ንቁ ተጠቃሚዎች: {active_users}\n\n"
+        
+        for stage, count in orders_by_stage:
+            if stage >= 0 and stage < len(stage_names):
+                text += f"  • {stage_names[stage]}: {count}\n"
+        
+        text += f"\n💰 **ጠቅላላ ገቢ:** {total_revenue:,.2f} ETB"
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data="dash_back"))
+        control_bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+    # ============================================================
+    # 7.8 BROADCAST MESSAGING
+    # ============================================================
+    def broadcast_menu(message):
+        chat_id = message.chat.id
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📢 ለሱቅ ባለቤቶች", callback_data="broadcast_owners"),
+            types.InlineKeyboardButton("👥 ለደንበኞች", callback_data="broadcast_customers"),
+            types.InlineKeyboardButton("👤 ለአንድ ተጠቃሚ", callback_data="broadcast_user"),
+            types.InlineKeyboardButton("🔙 Back", callback_data="dash_back")
+        )
+        control_bot.send_message(
+            chat_id,
+            "📢 **ብሮድካስት መልእክት**\n\n"
+            "መልእክት ለማን መላክ ይፈልጋሉ?",
+            reply_markup=markup
+        )
+
+    @control_bot.callback_query_handler(func=lambda call: call.data.startswith("broadcast_"))
+    def broadcast_type(call):
+        chat_id = call.message.chat.id
+        if not is_super_admin(chat_id):
+            control_bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+            return
+        
+        broadcast_type = call.data.split("_")[1]
+        control_bot.answer_callback_query(call.id)
+        
+        if broadcast_type == "user":
+            msg = control_bot.send_message(chat_id, "👤 የተጠቃሚ አይዲ (User ID) ያስገቡ:")
+            control_bot.register_next_step_handler(msg, lambda m: broadcast_to_user(m))
+        else:
+            msg = control_bot.send_message(
+                chat_id,
+                f"📝 **መልእክት ይላኩ**\n\n"
+                f"ለ{'ሱቅ ባለቤቶች' if broadcast_type == 'owners' else 'ደንበኞች'} የሚላከውን መልእክት ይላኩ:"
+            )
+            control_bot.register_next_step_handler(msg, lambda m: broadcast_to_all(m, broadcast_type))
+
+    def broadcast_to_all(message, target):
+        chat_id = message.chat.id
+        if not is_super_admin(chat_id):
+            return
+        
+        msg_text = message.text
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                if target == "owners":
+                    cursor.execute("SELECT DISTINCT admin_id FROM stores WHERE admin_id > 0 AND is_approved = 1")
+                else:
+                    cursor.execute("SELECT DISTINCT customer_id FROM orders")
+                users = cursor.fetchall()
+        finally:
+            put_conn(conn)
+        
+        if not users:
+            control_bot.reply_to(message, "❌ ምንም ተጠቃሚ አልተገኘም!")
+            return
+        
+        control_bot.reply_to(message, f"⏳ ለ {len(users)} ተጠቃሚዎች በማስተላለፍ ላይ...")
+        
+        success = 0
+        failed = 0
+        
+        for (user_id,) in users:
+            try:
+                control_bot.send_message(
+                    user_id,
+                    f"📢 **የሲስተም ማስታወቂያ**\n\n{msg_text}"
+                )
+                success += 1
+                time.sleep(0.05)
+            except:
+                failed += 1
+        
+        control_bot.send_message(
+            chat_id,
+            f"✅ ብሮድካስት ተጠናቋል!\n\n✅ የተሳካ: {success}\n❌ ያልተሳካ: {failed}",
+            reply_markup=get_dashboard_markup()
+        )
+
+    def broadcast_to_user(message):
+        chat_id = message.chat.id
+        if not is_super_admin(chat_id):
+            return
+        
+        try:
+            user_id = int(message.text.strip())
+        except:
+            control_bot.reply_to(message, "❌ የተሳሳተ አይዲ!")
+            return
+        
+        msg = control_bot.send_message(chat_id, "📝 ለተጠቃሚው የሚላከውን መልእክት ይላኩ:")
+        control_bot.register_next_step_handler(msg, lambda m: send_to_single_user(m, user_id))
+
+    def send_to_single_user(message, user_id):
+        chat_id = message.chat.id
+        if not is_super_admin(chat_id):
+            return
+        
+        msg_text = message.text
+        
+        try:
+            control_bot.send_message(
+                user_id,
+                f"📢 **የሲስተም ማስታወቂያ**\n\n{msg_text}"
+            )
+            control_bot.reply_to(message, f"✅ መልእክት ለተጠቃሚ {user_id} ተልኳል!", reply_markup=get_dashboard_markup())
+        except:
+            control_bot.reply_to(message, f"❌ መልእክት ለ {user_id} መላክ አልተቻለም!", reply_markup=get_dashboard_markup())
+
+    # ============================================================
+    # 7.9 NORMAL USER COMMANDS
+    # ============================================================
     @control_bot.message_handler(commands=['start', 'help'])
     def control_help(message):
         chat_id = message.chat.id
@@ -1717,7 +2312,8 @@ if CONTROL_BOT_TOKEN:
             "2️⃣ Token ከተቀበሉ '📝 አዲስ ሱቅ መዝግብ' ይጫኑ\n"
             "3️⃣ 5 ደረጃዎችን ይሙሉ\n\n"
             "📌 **ለሙከራ ሱቅ:** `/demo`\n"
-            "📌 **ሱቆችዎን ለማየት:** 🏪 ሱቆቼ"
+            "📌 **ሱቆችዎን ለማየት:** 🏪 ሱቆቼ\n\n"
+            "👑 **Super Admin ከሆኑ:** `/superadmin`"
         )
         control_bot.send_message(chat_id, help_text, reply_markup=markup, parse_mode="Markdown")
 
@@ -1734,7 +2330,7 @@ if CONTROL_BOT_TOKEN:
                 if existing:
                     control_bot.reply_to(
                         message,
-                        f"✅ ቀድሞውኑ ሱቅ አለዎት!\n\n🏪 **{existing[1]}**\n🔑 `{existing[0][:20]}...`\n\nሌላ ሱቅ ለመመዝገብ '📝 አዲስ ሱቅ መዝግብ' ይጠቀሙ"
+                        f"✅ ቀድሞውኑ ሱቅ አለዎት!\n\n🏪 **{existing[1]}**\n🔑 `{existing[0][:20]}...`"
                     )
                     return
                 
@@ -1744,11 +2340,11 @@ if CONTROL_BOT_TOKEN:
                 
                 h_pass, salt = hash_password("demo123")
                 cursor.execute('''INSERT INTO stores (token, store_name, admin_id, username, password_hash, password_salt, 
-                                  telebirr, cbebirr, is_active, shop_lat, shop_lng, area_text, shop_description)
-                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''',
+                                  telebirr, cbebirr, is_active, is_approved, shop_lat, shop_lng, area_text, shop_description)
+                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''',
                                (demo_token, demo_name, chat_id, demo_username, h_pass, salt, 
-                                "0911223344", "1000123456789", 1, 9.03, 38.74, "አዲስ አበባ", 
-                                "ይህ የሙከራ ሱቅ ነው! ምርቶችን ለመጨመር /login demo123"))
+                                "0911223344", "1000123456789", 1, 1, 9.03, 38.74, "አዲስ አበባ", 
+                                "ይህ የሙከራ ሱቅ ነው!"))
                 conn.commit()
                 
                 start_shop_bot(demo_token)
@@ -1766,9 +2362,6 @@ if CONTROL_BOT_TOKEN:
             control_bot.reply_to(message, f"❌ ስህተት: {e}")
         finally:
             put_conn(conn)
-
-    # Registration state
-    reg_states = {}
 
     @control_bot.message_handler(func=lambda m: m.text == "📝 አዲስ ሱቅ መዝግብ")
     def start_registration(message):
@@ -1791,7 +2384,7 @@ if CONTROL_BOT_TOKEN:
             test_bot = telebot.TeleBot(token)
             bot_info = test_bot.get_me()
         except Exception:
-            control_bot.reply_to(message, "❌ ቶከን ልክ አይደለም! እባክዎ ዳግም ይሞክሩ")
+            control_bot.reply_to(message, "❌ ቶከን ልክ አይደለም!")
             return
         
         reg_states[chat_id]["data"]["token"] = token
@@ -1885,27 +2478,37 @@ if CONTROL_BOT_TOKEN:
                 
                 cursor.execute('''INSERT INTO stores 
                                   (token, store_name, admin_id, username, password_hash, password_salt, 
-                                   telebirr, cbebirr, is_active, shop_lat, shop_lng, area_text, shop_description)
-                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''',
+                                   telebirr, cbebirr, is_active, is_approved, shop_lat, shop_lng, area_text, shop_description)
+                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''',
                                (data["token"], data["store_name"], chat_id, data["username"],
-                                h_pass, salt, "", "", 1,
+                                h_pass, salt, "", "", 1, 0,
                                 data.get("shop_lat"), data.get("shop_lng"), data.get("area_text", ""),
                                 data.get("shop_description", "")))
                 conn.commit()
                 
-                start_shop_bot(data["token"])
+                if SUPER_ADMIN_ID:
+                    try:
+                        control_bot.send_message(
+                            SUPER_ADMIN_ID,
+                            f"🔔 **አዲስ ሱቅ ለማጽደቅ ተመዝግቧል!**\n\n"
+                            f"🏪 **{data['store_name']}**\n"
+                            f"👤 @{data['username']}\n"
+                            f"📍 {data.get('area_text', 'አልተዘጋጀም')}"
+                        )
+                    except:
+                        pass
                 
                 del reg_states[chat_id]
                 
                 control_bot.reply_to(
                     message,
-                    f"🎉 **ሱቅ ተመዝግቧል!**\n\n"
+                    f"✅ **ሱቅ ተመዝግቧል!**\n\n"
                     f"🏪 **ስም:** {data['store_name']}\n"
                     f"👤 **ዩዘርኔም:** @{data['username']}\n"
                     f"📍 **አካባቢ:** {data.get('area_text', 'ተቀምጧል')}\n"
                     f"📝 **መግለጫ:** {data.get('shop_description', '')[:50]}...\n\n"
                     f"🔑 **የይለፍ ቃል:** `{data['password']}`\n\n"
-                    f"📌 ወደ ሱቅዎ ቦት ይሂዱ እና `/login {data['password']}` ይላኩ"
+                    f"⏳ **ሱቅዎ ለማጽደቅ በመጠባበቅ ላይ ነው!**"
                 )
         except Exception as e:
             control_bot.reply_to(message, f"❌ ስህተት: {e}")
@@ -1919,7 +2522,7 @@ if CONTROL_BOT_TOKEN:
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT id, store_name, token, is_active, username, area_text FROM stores WHERE admin_id=%s", (chat_id,))
+                cursor.execute("SELECT id, store_name, token, is_active, is_approved, username, area_text FROM stores WHERE admin_id=%s", (chat_id,))
                 stores = cursor.fetchall()
         finally:
             put_conn(conn)
@@ -1933,9 +2536,10 @@ if CONTROL_BOT_TOKEN:
             return
         
         text = "🏪 **ሱቆችዎ:**\n\n"
-        for store_id, name, token, is_active, username, area in stores:
+        for store_id, name, token, is_active, is_approved, username, area in stores:
             status = "🟢" if is_active == 1 else "🔴"
-            text += f"{status} **{name}**\n"
+            approved = "✅" if is_approved == 1 else "⏳"
+            text += f"{status} {approved} **{name}**\n"
             text += f"  👤 @{username if username else 'ስም'}\n"
             text += f"  📍 {area if area else 'አልተዘጋጀም'}\n"
             text += f"  🆔 #{store_id}\n\n"
@@ -1976,9 +2580,9 @@ if CONTROL_BOT_TOKEN:
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("""SELECT store_name, username, area_text, shop_description, is_active 
+                cursor.execute("""SELECT store_name, username, area_text, shop_description, is_active, is_approved
                                   FROM stores 
-                                  WHERE store_name ILIKE %s OR username ILIKE %s
+                                  WHERE (store_name ILIKE %s OR username ILIKE %s) AND is_approved = 1
                                   LIMIT 10""", (f"%{query}%", f"%{query}%"))
                 stores = cursor.fetchall()
         finally:
@@ -1989,7 +2593,7 @@ if CONTROL_BOT_TOKEN:
             return
         
         text = "🔍 **የተገኙ ሱቆች:**\n\n"
-        for name, username, area, desc, active in stores:
+        for name, username, area, desc, active, approved in stores:
             status = "🟢" if active == 1 else "🔴"
             text += f"{status} **{name}**\n"
             text += f"  👤 @{username if username else 'ስም'}\n"
@@ -2008,7 +2612,7 @@ if CONTROL_BOT_TOKEN:
             with conn.cursor() as cursor:
                 cursor.execute("""SELECT store_name, username, area_text, shop_description, is_active
                                   FROM stores 
-                                  WHERE shop_lat IS NOT NULL AND shop_lng IS NOT NULL
+                                  WHERE shop_lat IS NOT NULL AND shop_lng IS NOT NULL AND is_approved = 1
                                   AND (6371 * acos(cos(radians(%s)) * cos(radians(shop_lat)) * 
                                    cos(radians(shop_lng) - radians(%s)) + sin(radians(%s)) * 
                                    sin(radians(shop_lat)))) < 10
