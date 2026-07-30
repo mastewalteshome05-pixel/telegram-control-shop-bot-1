@@ -89,6 +89,9 @@ def init_db():
     conn = get_safe_connection()
     try:
         with conn.cursor() as cursor:
+            # ============================================================
+            # FIXED: Added is_approved column to stores table
+            # ============================================================
             cursor.execute('''CREATE TABLE IF NOT EXISTS stores (
                                 id SERIAL,
                                 token TEXT PRIMARY KEY,
@@ -156,6 +159,11 @@ def init_db():
                                 product_id INTEGER,
                                 qty INTEGER,
                                 price REAL)''')
+            
+            # ============================================================
+            # FIXED: Add is_approved column if it doesn't exist
+            # ============================================================
+            cursor.execute("ALTER TABLE stores ADD COLUMN IF NOT EXISTS is_approved INTEGER DEFAULT 0")
             
             conn.commit()
     finally:
@@ -371,9 +379,6 @@ def setup_bot_handlers(token):
             }
         return None
 
-    # ============================================================
-    # FIXED: check_active_middleware - no is_approved check
-    # ============================================================
     def check_active_middleware(chat_id):
         store = get_store_info()
         if not store:
@@ -603,7 +608,6 @@ def setup_bot_handlers(token):
     @bot.callback_query_handler(func=lambda call: call.data.startswith("shoplang_"))
     def set_language(call):
         chat_id = call.message.chat.id
-        # Check if store exists and is active (not approved check)
         store = get_store_info()
         if not store or not store["is_active"]:
             bot.answer_callback_query(call.id, "❌ ሱቅ ንቁ አይደለም!")
@@ -624,9 +628,6 @@ def setup_bot_handlers(token):
         bot.delete_message(chat_id, call.message.message_id)
         bot.send_message(chat_id, STRINGS[lang_code]["welcome"], reply_markup=get_main_menu(lang_code))
 
-    # ============================================================
-    # FIXED: LOGIN HANDLER - shows message if not approved
-    # ============================================================
     @bot.message_handler(commands=['login'])
     def login_store(message):
         chat_id = message.chat.id
