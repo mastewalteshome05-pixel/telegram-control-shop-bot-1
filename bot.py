@@ -371,16 +371,16 @@ def setup_bot_handlers(token):
             }
         return None
 
+    # ============================================================
+    # FIXED: check_active_middleware - no is_approved check
+    # ============================================================
     def check_active_middleware(chat_id):
         store = get_store_info()
         if not store:
             bot.send_message(chat_id, "🏪 ይህ ሱቅ ገና አልተመዘገበም።")
             return False
-        if store.get("is_approved", 0) != 1:
-            bot.send_message(chat_id, "⏳ ይህ ሱቅ ገና አልጸደቀም። እባክዎ ይጠብቁ።")
-            return False
         if not store["is_active"]:
-            bot.send_message(chat_id, "❌ ይህ ሱቅ ንቁ አይደለም።")
+            bot.send_message(chat_id, "❌ ይህ ሱቅ ንቁ አይደለም። እባክዎ አድሚኑን ያነጋግሩ።")
             return False
         return True
 
@@ -551,21 +551,64 @@ def setup_bot_handlers(token):
     # 5.2 BOT HANDLERS
     # ============================================================
     
+    # ============================================================
+    # FIXED: START HANDLER - works even if store not approved
+    # ============================================================
     @bot.message_handler(commands=['start'])
     def choose_language(message):
-        if not check_active_middleware(message.chat.id):
-            return
+        chat_id = message.chat.id
         store = get_store_info()
+        
+        if not store:
+            bot.send_message(
+                chat_id, 
+                "🏪 ይህ ቦት ገና አልተመዘገበም።\n"
+                "እባክዎ በControl Bot ይመዝገቡ!\n\n"
+                "📌 ለእርዳታ አድሚኑን ያነጋግሩ"
+            )
+            return
+        
+        # Store not approved yet
+        if store.get("is_approved", 0) != 1:
+            bot.send_message(
+                chat_id,
+                f"⏳ **ሰላም!**\n\n"
+                f"ይህ ሱቅ **{store.get('store_name', '')}** ገና አልጸደቀም።\n"
+                f"እባክዎ ለማጽደቅ ይጠብቁ።\n\n"
+                f"📌 ሱቁ ከጸደቀ በኋላ ማሳወቂያ ይደርስዎታል።",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Store is blocked
+        if not store["is_active"]:
+            bot.send_message(
+                chat_id,
+                "❌ ይህ ሱቅ ንቁ አይደለም። እባክዎ አድሚኑን ያነጋግሩ።"
+            )
+            return
+        
+        # Store is approved and active
         markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="shoplang_am"),
-                   types.InlineKeyboardButton("English 🇬🇧", callback_data="shoplang_en"))
-        bot.send_message(message.chat.id, f"🌐 Welcome to {store['store_name']}!\n\nቋንቋ ይምረጡ / Select Language:", reply_markup=markup)
+        markup.add(
+            types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="shoplang_am"),
+            types.InlineKeyboardButton("English 🇬🇧", callback_data="shoplang_en")
+        )
+        bot.send_message(
+            chat_id, 
+            f"🌐 Welcome to {store['store_name']}!\n\nቋንቋ ይምረጡ / Select Language:", 
+            reply_markup=markup
+        )
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("shoplang_"))
     def set_language(call):
         chat_id = call.message.chat.id
-        if not check_active_middleware(chat_id):
+        # Check if store exists and is active (not approved check)
+        store = get_store_info()
+        if not store or not store["is_active"]:
+            bot.answer_callback_query(call.id, "❌ ሱቅ ንቁ አይደለም!")
             return
+        
         lang_code = call.data.split("_")[1]
 
         conn = get_safe_connection()
@@ -581,6 +624,9 @@ def setup_bot_handlers(token):
         bot.delete_message(chat_id, call.message.message_id)
         bot.send_message(chat_id, STRINGS[lang_code]["welcome"], reply_markup=get_main_menu(lang_code))
 
+    # ============================================================
+    # FIXED: LOGIN HANDLER - shows message if not approved
+    # ============================================================
     @bot.message_handler(commands=['login'])
     def login_store(message):
         chat_id = message.chat.id
@@ -590,7 +636,11 @@ def setup_bot_handlers(token):
             return
         
         if store.get("is_approved", 0) != 1:
-            bot.reply_to(message, "⏳ ይህ ሱቅ ገና አልጸደቀም። እባክዎ ይጠብቁ።")
+            bot.reply_to(
+                message, 
+                "⏳ ይህ ሱቅ ገና አልጸደቀም።\n"
+                "እባክዎ ለማጽደቅ ይጠብቁ።"
+            )
             return
 
         attempt_key = (token, chat_id)
