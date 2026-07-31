@@ -47,25 +47,40 @@ import requests
 class Config:
     """የሲስተም ውቅር ክፍል"""
     
+    # Database
     DATABASE_URL = os.environ.get("DATABASE_URL")
+    DATABASE_POOL_MIN = int(os.environ.get("DATABASE_POOL_MIN", "2"))
+    DATABASE_POOL_MAX = int(os.environ.get("DATABASE_POOL_MAX", "20"))
+    
+    # Bot Tokens
     CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
     SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
     SUPER_ADMIN_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD")
+    
+    # API Keys
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    
+    # Server
     PORT = int(os.environ.get("PORT", "8080"))
     HOST = os.environ.get("HOST", "0.0.0.0")
     SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
     MAX_BOTS = int(os.environ.get("MAX_BOTS", "1000"))
     
+    # Security
     SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "7200"))
     MAX_LOGIN_ATTEMPTS = int(os.environ.get("MAX_LOGIN_ATTEMPTS", "5"))
     LOCKOUT_DURATION = int(os.environ.get("LOCKOUT_DURATION", "900"))
+    
+    # Bot Management
     BOT_RESTART_DELAY = int(os.environ.get("BOT_RESTART_DELAY", "5"))
     BOT_HEALTH_CHECK_INTERVAL = int(os.environ.get("BOT_HEALTH_CHECK_INTERVAL", "60"))
     MAX_BOT_RESTARTS = int(os.environ.get("MAX_BOT_RESTARTS", "5"))
     
+    # Delivery
     BASE_DELIVERY_FEE = float(os.environ.get("BASE_DELIVERY_FEE", "30"))
     PER_KM_RATE = float(os.environ.get("PER_KM_RATE", "8"))
+    
+    # Logging
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
     LOG_FILE = os.environ.get("LOG_FILE", "control_bot.log")
 
@@ -115,7 +130,7 @@ def init_db_pool():
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                 db_pool.putconn(conn)
-                logger.info(f"✅ Database pool initialized")
+                logger.info(f"✅ Database pool initialized (min={Config.DATABASE_POOL_MIN}, max={Config.DATABASE_POOL_MAX})")
             except Exception as e:
                 logger.error(f"❌ Database pool initialization failed: {e}")
                 raise
@@ -189,11 +204,11 @@ def db_execute_dict(query: str, params: tuple = None):
             put_db_connection(conn)
 
 # =================================================================================================
-#                           DATABASE SCHEMA - FIXED
+#                           DATABASE SCHEMA
 # =================================================================================================
 
 def init_schema():
-    """የውሂብ ጎታ ሰንጠረዦች መፍጠር - ሁሉም created_at አምዶች ተጨምረዋል"""
+    """የውሂብ ጎታ ሰንጠረዦች መፍጠር"""
     
     schema = """
     -- =====================================================
@@ -441,36 +456,9 @@ def init_schema():
     try:
         db_execute(schema)
         logger.info("✅ Database schema initialized successfully")
-        
-        # Seed initial settings
-        seed_settings()
     except Exception as e:
         logger.error(f"❌ Schema initialization failed: {e}")
         raise
-
-def seed_settings():
-    """ነባሪ ቅንብሮችን መጨመር"""
-    try:
-        settings = [
-            ('app_name', '"Control Bot v6.0"'),
-            ('app_version', '"6.0.0"'),
-            ('commission_rate', '0.05'),
-            ('delivery_base_fee', '30'),
-            ('delivery_per_km', '8'),
-            ('max_delivery_distance', '50'),
-            ('currency', '"ETB"'),
-            ('currency_symbol', '"Br"'),
-            ('default_language', '"am"'),
-        ]
-        
-        for key, value in settings:
-            db_execute("""
-                INSERT INTO settings (key, value) 
-                VALUES (%s, %s) 
-                ON CONFLICT (key) DO NOTHING
-            """, (key, value))
-    except Exception as e:
-        logger.warning(f"Seed settings error: {e}")
 
 # Initialize database
 init_db_pool()
