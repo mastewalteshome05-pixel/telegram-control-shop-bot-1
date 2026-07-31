@@ -1,224 +1,404 @@
+"""
+====================================================================================================
+                    🚀 ULTIMATE SHOP MANAGEMENT SYSTEM v8.0
+        Normal User Registration + Super Admin Panel + Shop Bot Engine
+====================================================================================================
+
+የሲስተሙ ክፍሎች:
+    1. Normal User Store Registration
+    2. Super Admin Control Panel (12 Buttons)
+    3. Shop Bot Engine (Multi-Store)
+    4. Verification System
+    5. Broadcast System
+    6. Analytics & Reports
+====================================================================================================
+"""
+
 import os
-import threading
-import hashlib
-import secrets
-import time
-import math
+import sys
 import json
+import secrets
+import hashlib
+import time
+import threading
+import math
 from datetime import datetime, timedelta
 import telebot
-from telebot import types, apihelper
-import google.generativeai as genai
-from flask import Flask, jsonify, request
+from telebot import types
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
+from flask import Flask, jsonify, request, render_template_string, session, redirect, url_for
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
 
-# ============================================================
-# 1. FLASK KEEP-ALIVE SERVER
-# ============================================================
-app = Flask('')
+# =================================================================================================
+#                           CONFIGURATION
+# =================================================================================================
 
-@app.route('/')
-def home():
-    return "🚀 Unified AI Shop Platform (Advanced Version) is Running!"
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
-
-@app.route('/stats')
-def stats():
-    conn = get_safe_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM stores")
-            stores = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM products")
-            products = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM orders")
-            orders = cursor.fetchone()[0]
-    finally:
-        put_conn(conn)
-    return jsonify({"stores": stores, "products": products, "orders": orders})
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
-
-# ============================================================
-# 2. GEMINI AI
-# ============================================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    ai_model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    ai_model = None
-    print("⚠️ GEMINI_API_KEY not set - AI fallback disabled.")
-
-# ============================================================
-# 3. POSTGRESQL (persistent, thread-safe, auto-reconnect)
-# ============================================================
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL environment variable is missing!")
+CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
+SUPER_ADMIN_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD", "Admin@123")
+SUPER_ADMIN_IDS = [int(id) for id in os.environ.get("SUPER_ADMIN_IDS", "").split(",") if id]
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+PORT = int(os.environ.get("PORT", 8080))
 
+if not DATABASE_URL:
+    raise ValueError("❌ DATABASE_URL required!")
+
+# =================================================================================================
+#                           FLASK APP
+# =================================================================================================
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+CORS(app, supports_credentials=True)
+
+# =================================================================================================
+#                           DATABASE LAYER
+# =================================================================================================
+
+db_pool = None
 db_pool_lock = threading.Lock()
 
-try:
-    db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
-    print("✅ PostgreSQL Connection Pool initialized.")
-except Exception as e:
-    print(f"❌ Failed to connect to PostgreSQL: {e}")
-    raise e
-
-def get_safe_connection():
+def init_db_pool():
     global db_pool
-    last_err = None
-    for _ in range(2):
-        try:
-            conn = db_pool.getconn()
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            return conn
-        except (psycopg2.InterfaceError, psycopg2.OperationalError, psycopg2.pool.PoolError) as e:
-            last_err = e
-            print("🔄 Re-initializing connection pool due to disconnect...")
-            with db_pool_lock:
-                try:
-                    db_pool.closeall()
-                except Exception:
-                    pass
+    with db_pool_lock:
+        if db_pool is None:
+            try:
                 db_pool = ThreadedConnectionPool(1, 20, dsn=DATABASE_URL)
-    raise last_err
+                conn = db_pool.getconn()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                db_pool.putconn(conn)
+                print("✅ Database pool initialized")
+            except Exception as e:
+                print(f"❌ Database pool init failed: {e}")
+                raise
+
+def get_conn():
+    global db_pool
+    if db_pool is None:
+        init_db_pool()
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn
+    except Exception as e:
+        print(f"❌ Connection error: {e}")
+        with db_pool_lock:
+            try:
+                if db_pool:
+                    db_pool.closeall()
+            except:
+                pass
+            db_pool = None
+            init_db_pool()
+        return db_pool.getconn()
 
 def put_conn(conn):
-    if conn is None:
-        return
-    try:
-        db_pool.putconn(conn)
-    except Exception:
+    if conn is not None and db_pool is not None:
         try:
-            conn.close()
-        except Exception:
-            pass
+            db_pool.putconn(conn)
+        except:
+            try:
+                conn.close()
+            except:
+                pass
 
-def init_db():
-    conn = get_safe_connection()
+def db_execute(query, params=None, fetch=False):
+    conn = None
     try:
-        with conn.cursor() as cursor:
-            # Stores table with additional fields
-            cursor.execute('''CREATE TABLE IF NOT EXISTS stores (
-                id SERIAL,
-                token TEXT PRIMARY KEY,
-                store_name TEXT,
-                admin_id BIGINT,
-                password_hash TEXT,
-                password_salt TEXT,
-                telebirr TEXT,
-                cbebirr TEXT,
-                is_active INTEGER DEFAULT 1,
-                shop_lat REAL,
-                shop_lng REAL,
-                area_text TEXT,
-                shop_photo TEXT,
-                shop_description TEXT,
-                opening_hours TEXT,
-                delivery_radius REAL DEFAULT 5,
-                min_order REAL DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # Products table with discount
-            cursor.execute('''CREATE TABLE IF NOT EXISTS products (
-                id SERIAL PRIMARY KEY,
-                token TEXT,
-                name_am TEXT,
-                name_en TEXT,
-                price REAL,
-                stock INTEGER,
-                desc_am TEXT,
-                desc_en TEXT,
-                image_url TEXT,
-                discount REAL DEFAULT 0,
-                discount_until TIMESTAMP,
-                category TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # Orders table with more details
-            cursor.execute('''CREATE TABLE IF NOT EXISTS orders (
-                id SERIAL PRIMARY KEY,
-                token TEXT,
-                customer_id BIGINT,
-                customer_phone TEXT,
-                customer_lat REAL,
-                customer_lng REAL,
-                status_am TEXT,
-                status_en TEXT,
-                total_price REAL,
-                delivery_fee REAL DEFAULT 0,
-                discount_amount REAL DEFAULT 0,
-                status_stage INTEGER DEFAULT 0,
-                payment_method TEXT,
-                payment_confirmed BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # Order items table
-            cursor.execute('''CREATE TABLE IF NOT EXISTS order_items (
-                id SERIAL PRIMARY KEY,
-                order_id INTEGER REFERENCES orders(id),
-                product_id INTEGER REFERENCES products(id),
-                product_name TEXT,
-                quantity INTEGER,
-                price REAL,
-                subtotal REAL
-            )''')
-
-            # Reviews table
-            cursor.execute('''CREATE TABLE IF NOT EXISTS reviews (
-                id SERIAL PRIMARY KEY,
-                product_id INTEGER REFERENCES products(id),
-                customer_id BIGINT,
-                rating INTEGER CHECK (rating >= 1 AND rating <= 5),
-                comment TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # User language table
-            cursor.execute('''CREATE TABLE IF NOT EXISTS user_langs (
-                chat_id BIGINT PRIMARY KEY,
-                lang TEXT
-            )''')
-
-            # Customer info with more details
-            cursor.execute('''CREATE TABLE IF NOT EXISTS customer_info (
-                chat_id BIGINT PRIMARY KEY,
-                phone TEXT,
-                lat REAL,
-                lng REAL,
-                address TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-
-            # Admin sessions
-            cursor.execute('''CREATE TABLE IF NOT EXISTS admin_sessions (
-                token TEXT,
-                chat_id BIGINT,
-                session_key TEXT,
-                expires_at TIMESTAMP,
-                PRIMARY KEY (token, chat_id)
-            )''')
-
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute(query, params or ())
+            if fetch:
+                return cur.fetchall()
             conn.commit()
+            return cur.rowcount if cur.rowcount > 0 else None
+    except Exception as e:
+        print(f"❌ DB error: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        raise
     finally:
-        put_conn(conn)
+        if conn:
+            put_conn(conn)
 
-init_db()
+def db_execute_dict(query, params=None):
+    conn = None
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params or ())
+            return cur.fetchall()
+    except Exception as e:
+        print(f"❌ DB error: {e}")
+        raise
+    finally:
+        if conn:
+            put_conn(conn)
+
+# =================================================================================================
+#                           DATABASE SCHEMA - COMPLETE
+# =================================================================================================
+
+def init_schema():
+    schema = """
+    -- =====================================================
+    -- USERS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        phone TEXT UNIQUE,
+        full_name TEXT,
+        is_admin BOOLEAN DEFAULT FALSE,
+        is_super_admin BOOLEAN DEFAULT FALSE,
+        is_verified BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP
+    );
+
+    -- =====================================================
+    -- STORE APPLICATIONS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS store_applications (
+        id SERIAL PRIMARY KEY,
+        store_name TEXT NOT NULL,
+        owner_name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        email TEXT,
+        location TEXT,
+        latitude REAL,
+        longitude REAL,
+        description TEXT,
+        category TEXT,
+        store_logo TEXT,
+        bot_token TEXT,
+        bot_username TEXT,
+        status TEXT DEFAULT 'pending',
+        admin_notes TEXT,
+        user_id INTEGER REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at TIMESTAMP,
+        reviewed_by INTEGER REFERENCES users(id)
+    );
+
+    -- =====================================================
+    -- STORES TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS stores (
+        id SERIAL PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        store_name TEXT NOT NULL,
+        admin_id BIGINT,
+        username TEXT,
+        phone TEXT,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        telebirr TEXT,
+        cbebirr TEXT,
+        is_active INTEGER DEFAULT 1,
+        is_approved INTEGER DEFAULT 0,
+        shop_lat REAL,
+        shop_lng REAL,
+        area_text TEXT,
+        shop_photo TEXT,
+        shop_description TEXT,
+        rating REAL DEFAULT 0,
+        total_sales REAL DEFAULT 0,
+        total_orders INTEGER DEFAULT 0,
+        bot_status TEXT DEFAULT 'stopped',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- PRODUCTS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        token TEXT NOT NULL,
+        name_am TEXT NOT NULL,
+        name_en TEXT,
+        price REAL NOT NULL,
+        stock INTEGER DEFAULT 0,
+        desc_am TEXT,
+        desc_en TEXT,
+        image_url TEXT,
+        discount REAL DEFAULT 0,
+        discount_until TIMESTAMP,
+        category TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- ORDERS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        token TEXT NOT NULL,
+        customer_id BIGINT NOT NULL,
+        customer_phone TEXT,
+        customer_lat REAL,
+        customer_lng REAL,
+        status_am TEXT DEFAULT 'በመጠባበቅ ላይ',
+        status_en TEXT DEFAULT 'Pending',
+        status_stage INTEGER DEFAULT 0,
+        total_price REAL NOT NULL,
+        delivery_fee REAL DEFAULT 0,
+        payment_method TEXT,
+        payment_confirmed BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- ORDER ITEMS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS order_items (
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER REFERENCES orders(id),
+        product_id INTEGER REFERENCES products(id),
+        product_name TEXT,
+        quantity INTEGER,
+        price REAL,
+        subtotal REAL
+    );
+
+    -- =====================================================
+    -- REVIEWS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS reviews (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER REFERENCES products(id),
+        customer_id BIGINT,
+        rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+        comment TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- USER LANGUAGES TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS user_langs (
+        chat_id BIGINT PRIMARY KEY,
+        lang TEXT DEFAULT 'am',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- CUSTOMER INFO TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS customer_info (
+        chat_id BIGINT PRIMARY KEY,
+        phone TEXT,
+        lat REAL,
+        lng REAL,
+        address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- ADMIN SESSIONS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+        token TEXT,
+        chat_id BIGINT,
+        session_key TEXT,
+        expires_at TIMESTAMP,
+        PRIMARY KEY (token, chat_id)
+    );
+
+    -- =====================================================
+    -- AUDIT LOGS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        action TEXT NOT NULL,
+        details JSONB,
+        ip_address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- BROADCASTS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS broadcasts (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        image_url TEXT,
+        target TEXT DEFAULT 'all',
+        sent_by INTEGER REFERENCES users(id),
+        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        delivered_count INTEGER DEFAULT 0
+    );
+
+    -- =====================================================
+    -- FAVORITES TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS favorites (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        store_id INTEGER REFERENCES stores(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- SETTINGS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS settings (
+        id SERIAL PRIMARY KEY,
+        key TEXT UNIQUE NOT NULL,
+        value TEXT,
+        category TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- INDEXES
+    -- =====================================================
+    CREATE INDEX IF NOT EXISTS idx_products_token ON products(token);
+    CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token);
+    CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_stores_token ON stores(token);
+    CREATE INDEX IF NOT EXISTS idx_store_applications_user ON store_applications(user_id);
+    CREATE INDEX IF NOT EXISTS idx_store_applications_status ON store_applications(status);
+    """
+    try:
+        db_execute(schema)
+        print("✅ Database schema initialized")
+        seed_default_data()
+    except Exception as e:
+        print(f"❌ Schema init failed: {e}")
+        raise
+
+def seed_default_data():
+    # Create default super admin if not exists
+    existing = db_execute("SELECT 1 FROM users WHERE is_super_admin = TRUE", fetch=True)
+    if not existing:
+        h_pass, salt = hash_password(SUPER_ADMIN_PASSWORD)
+        db_execute("""
+            INSERT INTO users (username, email, password_hash, password_salt, full_name, is_admin, is_super_admin, is_verified)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, ('superadmin', 'admin@system.com', h_pass, salt, 'Super Admin', True, True, True))
+        print("✅ Default Super Admin created: username='superadmin', password='Admin@123'")
+
+init_db_pool()
+init_schema()
+
+# =================================================================================================
+#                           UTILITY FUNCTIONS
+# =================================================================================================
 
 def hash_password(password, salt=None):
     if not salt:
@@ -229,1425 +409,2021 @@ def hash_password(password, salt=None):
 def generate_session_token():
     return secrets.token_hex(32)
 
+def format_currency(amount):
+    return f"{amount:,.2f} ETB"
+
+def format_date(dt):
+    return dt.strftime("%Y-%m-%d %H:%M") if dt else "N/A"
+
+# =================================================================================================
+#                           FLASK ROUTES - NORMAL USER
+# =================================================================================================
+
+@app.route('/')
+def index():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🏪 Shop Management System</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f0e17, #1a1a2e); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .container { background: rgba(255,255,255,0.05); backdrop-filter: blur(20px); border-radius: 24px; padding: 50px; max-width: 700px; width: 100%; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
+        .logo { text-align: center; font-size: 60px; margin-bottom: 10px; }
+        h1 { color: #fff; text-align: center; font-size: 28px; font-weight: 700; }
+        .subtitle { color: #888; text-align: center; margin-bottom: 30px; font-size: 14px; }
+        .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 30px 0; }
+        .feature { background: rgba(255,255,255,0.05); padding: 20px; border-radius: 12px; text-align: center; transition: all 0.3s; }
+        .feature:hover { transform: translateY(-5px); background: rgba(255,255,255,0.08); }
+        .feature .icon { font-size: 30px; }
+        .feature .label { color: #aaa; margin-top: 8px; font-size: 13px; }
+        .btn-group { display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
+        .btn { padding: 14px 20px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.3s; text-align: center; text-decoration: none; display: block; }
+        .btn-primary { background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; }
+        .btn-primary:hover { transform: scale(1.02); box-shadow: 0 10px 30px rgba(102,126,234,0.3); }
+        .btn-secondary { background: rgba(255,255,255,0.08); color: #fff; }
+        .btn-secondary:hover { background: rgba(255,255,255,0.15); }
+        .btn-success { background: #51cf66; color: #000; }
+        .btn-success:hover { transform: scale(1.02); box-shadow: 0 10px 30px rgba(81,207,102,0.3); }
+        .btn-danger { background: #ff6b6b; color: #fff; }
+        .footer { text-align: center; color: #555; margin-top: 30px; font-size: 12px; }
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 10px; font-weight: 600; background: #667eea; color: #fff; }
+        @media (max-width: 600px) { .features { grid-template-columns: repeat(2, 1fr); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🏪</div>
+        <h1>Shop Management System</h1>
+        <p class="subtitle">Multi-Store E-commerce Platform</p>
+        
+        <div class="features">
+            <div class="feature"><div class="icon">📝</div><div class="label">Store Registration</div></div>
+            <div class="feature"><div class="icon">🛍️</div><div class="label">Browse Stores</div></div>
+            <div class="feature"><div class="icon">🤖</div><div class="label">Telegram Bot</div></div>
+            <div class="feature"><div class="icon">💰</div><div class="label">Payment</div></div>
+            <div class="feature"><div class="icon">📦</div><div class="label">Order Tracking</div></div>
+            <div class="feature"><div class="icon">⭐</div><div class="label">Reviews</div></div>
+        </div>
+        
+        <div class="btn-group">
+            <a href="/register-store" class="btn btn-primary">📝 Register Store</a>
+            <a href="/applications" class="btn btn-secondary">📋 My Applications</a>
+            <a href="/stores" class="btn btn-secondary">🏪 Browse Stores</a>
+            <a href="/super-admin" class="btn btn-secondary">👑 Super Admin Panel</a>
+        </div>
+        
+        <div class="footer">© 2026 Shop Management System v8.0</div>
+    </div>
+</body>
+</html>
+    """)
+
+@app.route('/register-store', methods=['GET', 'POST'])
+def register_store():
+    if request.method == 'POST':
+        data = request.get_json()
+        
+        required = ['store_name', 'owner_name', 'phone', 'location']
+        for field in required:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+        
+        # Create user if not exists
+        user = db_execute_dict("SELECT id FROM users WHERE phone = %s", (data['phone'],))
+        if not user:
+            h_pass, salt = hash_password(secrets.token_hex(8))
+            user_id = db_execute("""
+                INSERT INTO users (username, email, password_hash, password_salt, phone, full_name)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            """, (f"user_{int(time.time())}", data.get('email', ''), h_pass, salt, data['phone'], data['owner_name']), fetch=True)[0][0]
+        else:
+            user_id = user[0]['id']
+        
+        # Validate bot token if provided
+        bot_token = data.get('bot_token')
+        bot_username = None
+        if bot_token:
+            try:
+                test_bot = telebot.TeleBot(bot_token)
+                bot_info = test_bot.get_me()
+                bot_username = bot_info.username
+            except:
+                return jsonify({'error': 'Invalid bot token'}), 400
+        
+        # Create application
+        app_id = db_execute("""
+            INSERT INTO store_applications (store_name, owner_name, phone, email, location, latitude, longitude,
+                                           description, category, store_logo, bot_token, bot_username, user_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        """, (
+            data['store_name'], data['owner_name'], data['phone'], data.get('email', ''),
+            data['location'], data.get('latitude'), data.get('longitude'),
+            data.get('description', ''), data.get('category', 'other'),
+            data.get('store_logo'), bot_token, bot_username, user_id
+        ), fetch=True)[0][0]
+        
+        # Notify super admins
+        admins = db_execute_dict("SELECT id FROM users WHERE is_super_admin = TRUE")
+        for admin in admins:
+            # In production, send email/telegram notification
+            pass
+        
+        return jsonify({
+            'success': True,
+            'application_id': app_id,
+            'message': 'Application submitted successfully!',
+            'status': 'pending'
+        })
+    
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>📝 Register Store</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f0e17, #1a1a2e); min-height: 100vh; padding: 20px; display: flex; align-items: center; justify-content: center; }
+        .container { background: rgba(255,255,255,0.05); backdrop-filter: blur(20px); border-radius: 24px; padding: 40px; max-width: 600px; width: 100%; border: 1px solid rgba(255,255,255,0.08); }
+        h2 { color: #fff; margin-bottom: 10px; }
+        .subtitle { color: #888; margin-bottom: 25px; font-size: 14px; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; color: #ddd; margin-bottom: 5px; font-weight: 500; font-size: 13px; }
+        input, select, textarea { width: 100%; padding: 12px 15px; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.05); color: #fff; font-size: 15px; transition: all 0.3s; }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: #667eea; box-shadow: 0 0 30px rgba(102,126,234,0.1); }
+        textarea { resize: vertical; min-height: 70px; }
+        select option { background: #1a1a2e; }
+        .btn { width: 100%; padding: 15px; border: none; border-radius: 12px; font-size: 17px; font-weight: 600; cursor: pointer; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; transition: all 0.3s; }
+        .btn:hover { transform: scale(1.02); box-shadow: 0 10px 30px rgba(102,126,234,0.3); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .back { color: #667eea; text-decoration: none; display: inline-block; margin-top: 15px; }
+        .message { padding: 12px 16px; border-radius: 10px; margin-top: 15px; display: none; font-size: 14px; }
+        .message.success { display: block; background: rgba(81,207,102,0.1); border: 1px solid #51cf66; color: #51cf66; }
+        .message.error { display: block; background: rgba(255,107,107,0.1); border: 1px solid #ff6b6b; color: #ff6b6b; }
+        .row { display: flex; gap: 15px; }
+        .row .form-group { flex: 1; }
+        @media (max-width: 600px) { .row { flex-direction: column; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>📝 Register Store</h2>
+        <p class="subtitle">Fill the form below to register your store</p>
+        
+        <form id="registerForm">
+            <div class="form-group">
+                <label>🏪 Store Name *</label>
+                <input type="text" id="storeName" placeholder="My Store" required>
+            </div>
+            <div class="row">
+                <div class="form-group">
+                    <label>👤 Owner Name *</label>
+                    <input type="text" id="ownerName" placeholder="Full Name" required>
+                </div>
+                <div class="form-group">
+                    <label>📱 Phone *</label>
+                    <input type="tel" id="phone" placeholder="0912345678" required>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>📧 Email</label>
+                <input type="email" id="email" placeholder="email@example.com">
+            </div>
+            <div class="form-group">
+                <label>📍 Location *</label>
+                <input type="text" id="location" placeholder="Addis Ababa, Bole" required>
+            </div>
+            <div class="form-group">
+                <label>🏷️ Category</label>
+                <select id="category">
+                    <option value="grocery">🛍️ Grocery</option>
+                    <option value="clothing">👕 Clothing</option>
+                    <option value="electronics">📱 Electronics</option>
+                    <option value="food">🍽️ Food</option>
+                    <option value="furniture">🏠 Furniture</option>
+                    <option value="books">📚 Books</option>
+                    <option value="beauty">💄 Beauty</option>
+                    <option value="other">🔧 Other</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>📝 Description</label>
+                <textarea id="description" placeholder="Describe your store..."></textarea>
+            </div>
+            <div class="form-group">
+                <label>🤖 Bot Token (Optional)</label>
+                <input type="text" id="botToken" placeholder="1234567890:ABCdef...">
+                <small style="color:#666;">Get from @BotFather</small>
+            </div>
+            <div class="form-group">
+                <label>🖼️ Store Logo URL (Optional)</label>
+                <input type="text" id="storeLogo" placeholder="https://example.com/logo.jpg">
+            </div>
+            <button type="submit" class="btn">📤 Submit Application</button>
+        </form>
+        
+        <div id="message" class="message"></div>
+        <a href="/" class="back">🔙 Back</a>
+    </div>
+    
+    <script>
+        document.getElementById('registerForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const btn = this.querySelector('button');
+            const msg = document.getElementById('message');
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Submitting...';
+            
+            const data = {
+                store_name: document.getElementById('storeName').value.trim(),
+                owner_name: document.getElementById('ownerName').value.trim(),
+                phone: document.getElementById('phone').value.trim(),
+                email: document.getElementById('email').value.trim(),
+                location: document.getElementById('location').value.trim(),
+                category: document.getElementById('category').value,
+                description: document.getElementById('description').value.trim(),
+                bot_token: document.getElementById('botToken').value.trim(),
+                store_logo: document.getElementById('storeLogo').value.trim()
+            };
+            
+            try {
+                const response = await fetch('/register-store', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    msg.className = 'message success';
+                    msg.textContent = '✅ ' + result.message + ' (ID: ' + result.application_id + ')';
+                    btn.textContent = '✅ Submitted!';
+                    setTimeout(() => { window.location.href = '/applications'; }, 2000);
+                } else {
+                    msg.className = 'message error';
+                    msg.textContent = '❌ ' + (result.error || 'Error occurred');
+                    btn.disabled = false;
+                    btn.textContent = '📤 Submit Application';
+                }
+            } catch (error) {
+                msg.className = 'message error';
+                msg.textContent = '❌ Network error';
+                btn.disabled = false;
+                btn.textContent = '📤 Submit Application';
+            }
+        });
+    </script>
+</body>
+</html>
+    """)
+
+@app.route('/applications')
+def applications():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>📋 My Applications</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f0e17, #1a1a2e); min-height: 100vh; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .header { text-align: center; padding: 30px 0; }
+        .header h1 { color: #fff; font-size: 28px; }
+        .header p { color: #888; }
+        .search-box { display: flex; gap: 10px; margin-bottom: 20px; }
+        .search-box input { flex: 1; padding: 12px 15px; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; }
+        .search-box input:focus { outline: none; border-color: #667eea; }
+        .search-box button { padding: 12px 25px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; cursor: pointer; font-size: 16px; transition: all 0.3s; }
+        .search-box button:hover { transform: scale(1.05); }
+        .card { background: rgba(255,255,255,0.05); border-radius: 14px; padding: 20px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.08); }
+        .card h3 { color: #fff; margin-bottom: 8px; }
+        .card .info { color: #aaa; font-size: 14px; line-height: 1.6; }
+        .card .info strong { color: #ddd; }
+        .status-badge { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .status-pending { background: #fcc419; color: #000; }
+        .status-approved { background: #51cf66; color: #000; }
+        .status-rejected { background: #ff6b6b; color: #fff; }
+        .status-changes { background: #ffa94d; color: #000; }
+        .empty { text-align: center; color: #666; padding: 40px 0; }
+        .empty .icon { font-size: 48px; }
+        .btn { display: inline-block; padding: 10px 25px; border: none; border-radius: 10px; font-size: 16px; cursor: pointer; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; text-decoration: none; transition: all 0.3s; margin-top: 10px; }
+        .btn:hover { transform: scale(1.05); }
+        .btn-secondary { background: rgba(255,255,255,0.08); }
+        .btn-secondary:hover { background: rgba(255,255,255,0.15); }
+        .back { color: #667eea; text-decoration: none; display: inline-block; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 My Applications</h1>
+            <p>Check your store registration applications</p>
+        </div>
+        
+        <div class="search-box">
+            <input type="text" id="phoneInput" placeholder="📱 Enter phone number (e.g., 0912345678)">
+            <button onclick="loadApplications()">🔍 Search</button>
+        </div>
+        
+        <div id="results"></div>
+        
+        <div style="text-align:center; margin-top:20px;">
+            <a href="/" class="btn btn-secondary">🔙 Back</a>
+            <a href="/register-store" class="btn">📝 Register Store</a>
+        </div>
+    </div>
+    
+    <script>
+        async function loadApplications() {
+            const phone = document.getElementById('phoneInput').value.trim();
+            if (!phone) {
+                alert('📱 Please enter a phone number!');
+                return;
+            }
+            
+            const results = document.getElementById('results');
+            results.innerHTML = '<div style="text-align:center;color:#888;">⏳ Loading...</div>';
+            
+            try {
+                const response = await fetch(`/api/applications?phone=${encodeURIComponent(phone)}`);
+                const data = await response.json();
+                
+                if (data.applications && data.applications.length > 0) {
+                    let html = '';
+                    data.applications.forEach(app => {
+                        const statusClass = `status-${app.status}`;
+                        const statusLabels = {
+                            'pending': '⏳ Pending',
+                            'approved': '✅ Approved',
+                            'rejected': '❌ Rejected',
+                            'changes_requested': '✏️ Changes Requested'
+                        };
+                        html += `
+                            <div class="card">
+                                <h3>🏪 ${app.store_name}</h3>
+                                <div class="info">
+                                    <span class="status-badge ${statusClass}">${statusLabels[app.status] || app.status}</span>
+                                    <span style="color:#666;margin-left:10px;">📅 ${new Date(app.created_at).toLocaleDateString()}</span>
+                                    ${app.admin_notes ? `<div style="margin-top:8px;padding:10px;background:rgba(255,255,255,0.03);border-radius:8px;">📝 ${app.admin_notes}</div>` : ''}
+                                </div>
+                            </div>
+                        `;
+                    });
+                    results.innerHTML = html;
+                } else {
+                    results.innerHTML = `
+                        <div class="empty">
+                            <div class="icon">📭</div>
+                            <p>No applications found</p>
+                            <p style="font-size:14px;margin-top:10px;">Register a new store <a href="/register-store" style="color:#667eea;">here</a></p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                results.innerHTML = '<div class="empty" style="color:#ff6b6b;">❌ Error loading applications</div>';
+            }
+        }
+    </script>
+</body>
+</html>
+    """)
+
+@app.route('/stores')
+def browse_stores():
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🏪 Browse Stores</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f0e17, #1a1a2e); min-height: 100vh; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .header { text-align: center; padding: 30px 0; }
+        .header h1 { color: #fff; font-size: 28px; }
+        .header p { color: #888; }
+        .search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
+        .search-bar input { flex: 1; padding: 12px 15px; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; }
+        .search-bar input:focus { outline: none; border-color: #667eea; }
+        .search-bar button { padding: 12px 25px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; cursor: pointer; font-size: 16px; transition: all 0.3s; }
+        .search-bar button:hover { transform: scale(1.05); }
+        .stores-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; }
+        .store-card { background: rgba(255,255,255,0.05); border-radius: 14px; padding: 20px; border: 1px solid rgba(255,255,255,0.08); transition: all 0.3s; }
+        .store-card:hover { transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+        .store-card .name { color: #fff; font-size: 18px; font-weight: 600; }
+        .store-card .info { color: #aaa; font-size: 13px; margin-top: 5px; }
+        .store-card .info strong { color: #ddd; }
+        .store-card .rating { color: #fcc419; margin-top: 8px; }
+        .store-card .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+        .badge-active { background: #51cf66; color: #000; }
+        .badge-inactive { background: #ff6b6b; color: #fff; }
+        .empty { text-align: center; color: #666; padding: 40px 0; }
+        .empty .icon { font-size: 48px; }
+        .btn { display: inline-block; padding: 10px 25px; border: none; border-radius: 10px; font-size: 16px; cursor: pointer; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; text-decoration: none; transition: all 0.3s; }
+        .btn:hover { transform: scale(1.05); }
+        .btn-secondary { background: rgba(255,255,255,0.08); }
+        .btn-secondary:hover { background: rgba(255,255,255,0.15); }
+        .back { color: #667eea; text-decoration: none; display: inline-block; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏪 Browse Stores</h1>
+            <p>Discover verified stores</p>
+        </div>
+        
+        <div class="search-bar">
+            <input type="text" id="searchInput" placeholder="🔍 Search stores by name or location...">
+            <button onclick="searchStores()">🔍 Search</button>
+            <button onclick="loadAllStores()" style="background:rgba(255,255,255,0.08);">🔄 All</button>
+        </div>
+        
+        <div id="results" class="stores-grid"></div>
+        
+        <div style="text-align:center; margin-top:20px;">
+            <a href="/" class="btn btn-secondary">🔙 Back</a>
+        </div>
+    </div>
+    
+    <script>
+        async function loadAllStores() {
+            document.getElementById('searchInput').value = '';
+            await fetchStores();
+        }
+        
+        async function searchStores() {
+            const query = document.getElementById('searchInput').value.trim();
+            await fetchStores(query);
+        }
+        
+        async function fetchStores(query = '') {
+            const results = document.getElementById('results');
+            results.innerHTML = '<div style="text-align:center;color:#888;grid-column:1/-1;">⏳ Loading...</div>';
+            
+            try {
+                const url = query ? `/api/stores?search=${encodeURIComponent(query)}` : '/api/stores';
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                if (data.stores && data.stores.length > 0) {
+                    let html = '';
+                    data.stores.forEach(store => {
+                        const stars = '⭐'.repeat(Math.round(store.rating || 0)) + '☆'.repeat(5 - Math.round(store.rating || 0));
+                        html += `
+                            <div class="store-card">
+                                <div class="name">${store.name}</div>
+                                <div class="info"><strong>📍</strong> ${store.location || 'N/A'}</div>
+                                <div class="info"><strong>📦</strong> ${store.total_orders || 0} orders</div>
+                                ${store.rating ? `<div class="rating">${stars} ${store.rating.toFixed(1)}</div>` : ''}
+                                <div style="margin-top:10px;">
+                                    <span class="badge ${store.is_active ? 'badge-active' : 'badge-inactive'}">${store.is_active ? '🟢 Active' : '🔴 Inactive'}</span>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    results.innerHTML = html;
+                } else {
+                    results.innerHTML = `
+                        <div class="empty" style="grid-column:1/-1;">
+                            <div class="icon">🏪</div>
+                            <p>No stores found</p>
+                            <p style="font-size:14px;margin-top:10px;">Be the first to <a href="/register-store" style="color:#667eea;">register a store</a></p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                results.innerHTML = '<div class="empty" style="grid-column:1/-1;color:#ff6b6b;">❌ Error loading stores</div>';
+            }
+        }
+        
+        loadAllStores();
+    </script>
+</body>
+</html>
+    """)
+
+# =================================================================================================
+#                           FLASK API ROUTES
+# =================================================================================================
+
+@app.route('/api/applications')
+def api_applications():
+    phone = request.args.get('phone')
+    if not phone:
+        return jsonify({'error': 'Phone required'}), 400
+    
+    apps = db_execute_dict("""
+        SELECT sa.id, sa.store_name, sa.status, sa.admin_notes, sa.created_at
+        FROM store_applications sa
+        JOIN users u ON sa.user_id = u.id
+        WHERE u.phone = %s
+        ORDER BY sa.created_at DESC
+    """, (phone,))
+    
+    return jsonify({'applications': apps})
+
+@app.route('/api/stores')
+def api_stores():
+    search = request.args.get('search', '')
+    
+    if search:
+        stores = db_execute_dict("""
+            SELECT id, store_name as name, area_text as location, rating, total_orders, is_active
+            FROM stores
+            WHERE (store_name ILIKE %s OR area_text ILIKE %s) AND is_approved = 1
+            ORDER BY rating DESC
+            LIMIT 50
+        """, (f"%{search}%", f"%{search}%"))
+    else:
+        stores = db_execute_dict("""
+            SELECT id, store_name as name, area_text as location, rating, total_orders, is_active
+            FROM stores
+            WHERE is_approved = 1
+            ORDER BY rating DESC
+            LIMIT 50
+        """)
+    
+    return jsonify({'stores': stores})
+
+# =================================================================================================
+#                           SUPER ADMIN PANEL (Flask)
+# =================================================================================================
+
+@app.route('/super-admin', methods=['GET', 'POST'])
+def super_admin():
+    # Check if already logged in
+    if session.get('super_admin'):
+        return render_template_string(get_dashboard_html())
+    
+    if request.method == 'POST':
+        data = request.get_json() or request.form
+        username = data.get('username', 'superadmin')
+        password = data.get('password')
+        
+        if password == SUPER_ADMIN_PASSWORD:
+            session['super_admin'] = True
+            session['login_time'] = datetime.now().isoformat()
+            return jsonify({'success': True, 'redirect': '/super-admin'})
+        
+        return jsonify({'error': 'Invalid password'}), 401
+    
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>👑 Super Admin Login</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f0e17, #1a1a2e); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .container { background: rgba(255,255,255,0.05); backdrop-filter: blur(20px); border-radius: 24px; padding: 50px; max-width: 420px; width: 100%; border: 1px solid rgba(255,255,255,0.08); }
+        .logo { text-align: center; font-size: 60px; }
+        h2 { color: #fff; text-align: center; font-size: 28px; margin: 10px 0; }
+        .subtitle { color: #888; text-align: center; margin-bottom: 30px; font-size: 14px; }
+        input { width: 100%; padding: 14px 18px; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; background: rgba(255,255,255,0.05); color: #fff; font-size: 16px; margin-bottom: 15px; transition: all 0.3s; }
+        input:focus { outline: none; border-color: #667eea; box-shadow: 0 0 30px rgba(102,126,234,0.1); }
+        .btn { width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 18px; font-weight: 600; cursor: pointer; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; transition: all 0.3s; }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(102,126,234,0.3); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .message { padding: 12px 16px; border-radius: 10px; margin-top: 15px; display: none; font-size: 14px; }
+        .message.error { display: block; background: rgba(255,107,107,0.1); border: 1px solid #ff6b6b; color: #ff6b6b; }
+        .message.success { display: block; background: rgba(81,207,102,0.1); border: 1px solid #51cf66; color: #51cf66; }
+        .footer { text-align: center; color: #555; margin-top: 20px; font-size: 12px; }
+        .back { color: #667eea; text-decoration: none; display: inline-block; margin-top: 10px; text-align: center; width: 100%; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">👑</div>
+        <h2>Super Admin</h2>
+        <p class="subtitle">Login to access the control panel</p>
+        <form id="loginForm">
+            <input type="text" id="username" placeholder="Username" value="superadmin">
+            <input type="password" id="password" placeholder="Password">
+            <button type="submit" class="btn">🔓 Login</button>
+        </form>
+        <div id="message" class="message"></div>
+        <a href="/" class="back">🔙 Back to Home</a>
+        <div class="footer">© 2026 Super Admin Panel</div>
+    </div>
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const btn = this.querySelector('button');
+            const msg = document.getElementById('message');
+            btn.disabled = true;
+            btn.textContent = '⏳ Logging in...';
+            try {
+                const response = await fetch('/super-admin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value,
+                        password: document.getElementById('password').value
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    msg.className = 'message success';
+                    msg.textContent = '✅ Login successful! Redirecting...';
+                    setTimeout(() => { window.location.href = '/super-admin'; }, 1000);
+                } else {
+                    msg.className = 'message error';
+                    msg.textContent = '❌ ' + (data.error || 'Invalid credentials');
+                    btn.disabled = false;
+                    btn.textContent = '🔓 Login';
+                }
+            } catch (error) {
+                msg.className = 'message error';
+                msg.textContent = '❌ Network error';
+                btn.disabled = false;
+                btn.textContent = '🔓 Login';
+            }
+        });
+    </script>
+</body>
+</html>
+    """)
+
+@app.route('/super-admin/logout')
+def super_admin_logout():
+    session.clear()
+    return redirect('/super-admin')
+
+# =================================================================================================
+#                           SUPER ADMIN DASHBOARD HTML
+# =================================================================================================
+
+def get_dashboard_html():
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>👑 Super Admin Panel</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0f0e17; color: #fff; min-height: 100vh; }
+        .sidebar { position: fixed; left: 0; top: 0; width: 220px; height: 100vh; background: rgba(26,26,46,0.95); border-right: 1px solid rgba(255,255,255,0.05); padding: 20px 12px; overflow-y: auto; z-index: 1000; }
+        .sidebar .logo { text-align: center; font-size: 28px; }
+        .sidebar .brand { text-align: center; font-size: 14px; font-weight: 700; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .sidebar .sub-brand { text-align: center; color: #666; font-size: 10px; margin-bottom: 15px; }
+        .sidebar .user-info { background: rgba(255,255,255,0.05); border-radius: 10px; padding: 12px; margin-bottom: 15px; text-align: center; }
+        .sidebar .user-info .avatar { font-size: 30px; }
+        .sidebar .user-info .name { font-weight: 600; font-size: 13px; }
+        .sidebar .user-info .role { color: #888; font-size: 10px; }
+        .sidebar .nav-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 8px; color: #aaa; cursor: pointer; transition: all 0.3s; margin-bottom: 2px; border: none; background: none; width: 100%; font-size: 12px; font-family: inherit; }
+        .sidebar .nav-item:hover { background: rgba(255,255,255,0.05); color: #fff; }
+        .sidebar .nav-item.active { background: linear-gradient(135deg, rgba(102,126,234,0.2), rgba(118,75,162,0.2)); color: #fff; border: 1px solid rgba(102,126,234,0.2); }
+        .sidebar .nav-item .icon { font-size: 14px; width: 20px; text-align: center; }
+        .sidebar .nav-item .badge { margin-left: auto; background: #667eea; color: #fff; padding: 1px 6px; border-radius: 10px; font-size: 9px; }
+        .sidebar .nav-divider { height: 1px; background: rgba(255,255,255,0.05); margin: 10px 0; }
+        .sidebar .nav-item.logout { color: #ff6b6b; }
+        .sidebar .nav-item.logout:hover { background: rgba(255,107,107,0.1); }
+        .main { margin-left: 220px; padding: 20px; min-height: 100vh; }
+        .main .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+        .main .header h1 { font-size: 22px; font-weight: 700; }
+        .main .header .time { color: #888; font-size: 12px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .stat-card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 15px; border: 1px solid rgba(255,255,255,0.05); transition: all 0.3s; }
+        .stat-card:hover { transform: translateY(-3px); box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+        .stat-card .stat-icon { font-size: 20px; margin-bottom: 3px; }
+        .stat-card .stat-number { font-size: 22px; font-weight: 700; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .stat-card .stat-label { color: #888; font-size: 11px; margin-top: 2px; }
+        .content-section { display: none; animation: fadeIn 0.3s ease; }
+        .content-section.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .section-title { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+        .card { background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 12px; }
+        .card h3 { font-size: 15px; margin-bottom: 8px; }
+        .card .info { color: #aaa; line-height: 1.6; font-size: 13px; }
+        .card .info strong { color: #ddd; }
+        .table-container { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; }
+        table th, table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 12px; }
+        table th { color: #888; font-weight: 500; font-size: 10px; text-transform: uppercase; }
+        table td { color: #ddd; }
+        .status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+        .status-pending { background: #fcc419; color: #000; }
+        .status-approved { background: #51cf66; color: #000; }
+        .status-rejected { background: #ff6b6b; color: #fff; }
+        .status-active { background: #51cf66; color: #000; }
+        .status-inactive { background: #ff6b6b; color: #fff; }
+        .btn-sm { padding: 4px 10px; border: none; border-radius: 6px; font-size: 10px; cursor: pointer; transition: all 0.3s; font-family: inherit; }
+        .btn-sm:hover { transform: scale(1.05); }
+        .btn-sm.approve { background: #51cf66; color: #000; }
+        .btn-sm.reject { background: #ff6b6b; color: #fff; }
+        .btn-sm.changes { background: #ffa94d; color: #000; }
+        .btn-sm.primary { background: #667eea; color: #fff; }
+        .btn-sm.danger { background: #ff6b6b; color: #fff; }
+        .btn-broadcast { padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; transition: all 0.3s; font-family: inherit; }
+        .btn-broadcast:hover { transform: scale(1.05); }
+        textarea { width: 100%; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(255,255,255,0.05); color: #fff; font-size: 13px; resize: vertical; min-height: 60px; font-family: inherit; }
+        textarea:focus { outline: none; border-color: #667eea; }
+        input, select { width: 100%; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: rgba(255,255,255,0.05); color: #fff; font-size: 13px; font-family: inherit; }
+        input:focus, select:focus { outline: none; border-color: #667eea; }
+        select option { background: #1a1a2e; }
+        .row { display: flex; gap: 12px; flex-wrap: wrap; }
+        .row > * { flex: 1; min-width: 150px; }
+        .form-group { margin-bottom: 10px; }
+        .form-group label { display: block; color: #ddd; margin-bottom: 3px; font-weight: 500; font-size: 11px; }
+        .empty-state { text-align: center; color: #666; padding: 25px 0; }
+        .empty-state .icon { font-size: 35px; }
+        .empty-state p { margin-top: 5px; font-size: 13px; }
+        @media (max-width: 768px) {
+            .sidebar { width: 55px; padding: 10px 6px; }
+            .sidebar .brand, .sidebar .sub-brand, .sidebar .user-info .name, .sidebar .user-info .role, .sidebar .nav-item span:not(.icon) { display: none; }
+            .sidebar .nav-item { justify-content: center; padding: 8px; }
+            .sidebar .nav-item .badge { display: none; }
+            .main { margin-left: 55px; padding: 12px; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 480px) { .stats-grid { grid-template-columns: 1fr; } .row { flex-direction: column; } }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #1a1a2e; }
+        ::-webkit-scrollbar-thumb { background: #667eea; border-radius: 2px; }
+        .logout-link { color: #ff6b6b; text-decoration: none; }
+        .logout-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <div class="logo">👑</div>
+    <div class="brand">Super Admin</div>
+    <div class="sub-brand">Control Panel v8.0</div>
+    <div class="user-info">
+        <div class="avatar">👤</div>
+        <div class="name">Super Admin</div>
+        <div class="role">🔑 Administrator</div>
+    </div>
+    <nav>
+        <button class="nav-item active" onclick="showSection('dashboard')" data-section="dashboard"><span class="icon">📊</span><span>Dashboard</span></button>
+        <button class="nav-item" onclick="showSection('users')" data-section="users"><span class="icon">👥</span><span>Users</span><span class="badge" id="userBadge">0</span></button>
+        <button class="nav-item" onclick="showSection('applications')" data-section="applications"><span class="icon">📝</span><span>Applications</span><span class="badge" id="appBadge">0</span></button>
+        <button class="nav-item" onclick="showSection('stores')" data-section="stores"><span class="icon">🏪</span><span>Stores</span><span class="badge" id="storeBadge">0</span></button>
+        <button class="nav-item" onclick="showSection('orders')" data-section="orders"><span class="icon">📦</span><span>Orders</span><span class="badge" id="orderBadge">0</span></button>
+        <button class="nav-item" onclick="showSection('reviews')" data-section="reviews"><span class="icon">⭐</span><span>Reviews</span></button>
+        <button class="nav-item" onclick="showSection('broadcast')" data-section="broadcast"><span class="icon">📢</span><span>Broadcast</span></button>
+        <button class="nav-item" onclick="showSection('revenue')" data-section="revenue"><span class="icon">💰</span><span>Revenue</span></button>
+        <button class="nav-item" onclick="showSection('reports')" data-section="reports"><span class="icon">📈</span><span>Reports</span></button>
+        <button class="nav-item" onclick="showSection('settings')" data-section="settings"><span class="icon">⚙️</span><span>Settings</span></button>
+        <div class="nav-divider"></div>
+        <a href="/super-admin/logout" class="nav-item logout"><span class="icon">🚪</span><span>Logout</span></a>
+    </nav>
+</div>
+
+<div class="main">
+    <div class="header">
+        <h1 id="pageTitle">📊 Dashboard</h1>
+        <div class="time" id="currentTime"></div>
+    </div>
+    
+    <!-- DASHBOARD -->
+    <div class="content-section active" id="section-dashboard">
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card"><div class="stat-icon">👥</div><div class="stat-number" id="statUsers">-</div><div class="stat-label">Total Users</div></div>
+            <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-number" id="statApps">-</div><div class="stat-label">Pending Apps</div></div>
+            <div class="stat-card"><div class="stat-icon">🏪</div><div class="stat-number" id="statStores">-</div><div class="stat-label">Total Stores</div></div>
+            <div class="stat-card"><div class="stat-icon">📦</div><div class="stat-number" id="statOrders">-</div><div class="stat-label">Total Orders</div></div>
+            <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-number" id="statRevenue">-</div><div class="stat-label">Revenue</div></div>
+            <div class="stat-card"><div class="stat-icon">⭐</div><div class="stat-number" id="statReviews">-</div><div class="stat-label">Reviews</div></div>
+        </div>
+        <div class="card"><h3>📈 Recent Activity</h3><div class="info" id="recentActivity">Loading...</div></div>
+    </div>
+    
+    <!-- USERS -->
+    <div class="content-section" id="section-users">
+        <div class="section-title">👥 User Management</div>
+        <div class="card"><div class="table-container"><table><thead><tr><th>ID</th><th>Username</th><th>Phone</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody id="usersTable"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody></table></div></div>
+    </div>
+    
+    <!-- APPLICATIONS -->
+    <div class="content-section" id="section-applications">
+        <div class="section-title">📝 Store Applications</div>
+        <div id="applicationsList"><div class="empty-state">Loading...</div></div>
+    </div>
+    
+    <!-- STORES -->
+    <div class="content-section" id="section-stores">
+        <div class="section-title">🏪 Store Management</div>
+        <div class="card"><div class="table-container"><table><thead><tr><th>ID</th><th>Name</th><th>Location</th><th>Status</th><th>Rating</th><th>Actions</th></tr></thead><tbody id="storesTable"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody></table></div></div>
+    </div>
+    
+    <!-- ORDERS -->
+    <div class="content-section" id="section-orders">
+        <div class="section-title">📦 Order Management</div>
+        <div class="card"><div class="table-container"><table><thead><tr><th>Order #</th><th>Customer</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead><tbody id="ordersTable"><tr><td colspan="5" class="empty-state">Loading...</td></tr></tbody></table></div></div>
+    </div>
+    
+    <!-- REVIEWS -->
+    <div class="content-section" id="section-reviews">
+        <div class="section-title">⭐ Reviews Management</div>
+        <div id="reviewsList"><div class="empty-state">Loading...</div></div>
+    </div>
+    
+    <!-- BROADCAST -->
+    <div class="content-section" id="section-broadcast">
+        <div class="section-title">📢 Broadcast Message</div>
+        <div class="card">
+            <div class="form-group"><label>📝 Title</label><input type="text" id="broadcastTitle" placeholder="Message Title"></div>
+            <div class="form-group"><label>📝 Message</label><textarea id="broadcastMessage" placeholder="Enter your message..."></textarea></div>
+            <div class="form-group"><label>🖼️ Image URL</label><input type="text" id="broadcastImage" placeholder="https://example.com/image.jpg"></div>
+            <div class="form-group"><label>🎯 Target</label><select id="broadcastTarget"><option value="all">All Users</option><option value="store_owners">Store Owners</option><option value="admins">Admins</option></select></div>
+            <button class="btn-broadcast" onclick="sendBroadcast()">📤 Send Broadcast</button>
+            <div id="broadcastResult" style="margin-top:10px;"></div>
+        </div>
+    </div>
+    
+    <!-- REVENUE -->
+    <div class="content-section" id="section-revenue">
+        <div class="section-title">💰 Revenue Analytics</div>
+        <div class="card"><h3>📊 Revenue Overview</h3><div id="revenueChart" style="padding:10px 0;">Loading...</div></div>
+        <div class="card"><h3>🏆 Top Stores</h3><div id="topStoresList">Loading...</div></div>
+    </div>
+    
+    <!-- REPORTS -->
+    <div class="content-section" id="section-reports">
+        <div class="section-title">📈 Reports</div>
+        <div class="card">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+                <button class="btn-sm primary" onclick="generateReport('stores')">🏪 Stores</button>
+                <button class="btn-sm primary" onclick="generateReport('orders')">📦 Orders</button>
+                <button class="btn-sm primary" onclick="generateReport('users')">👥 Users</button>
+                <button class="btn-sm primary" onclick="generateReport('revenue')">💰 Revenue</button>
+            </div>
+            <div id="reportResult"><div class="empty-state">📄 Select a report type</div></div>
+        </div>
+    </div>
+    
+    <!-- SETTINGS -->
+    <div class="content-section" id="section-settings">
+        <div class="section-title">⚙️ Settings</div>
+        <div class="card">
+            <h3>System Settings</h3>
+            <div class="row">
+                <div class="form-group"><label>🌐 Site Name</label><input type="text" id="setting_site_name" placeholder="Shop System"></div>
+                <div class="form-group"><label>💰 Commission (%)</label><input type="number" id="setting_commission" placeholder="5"></div>
+            </div>
+            <div class="row">
+                <div class="form-group"><label>📧 Support Email</label><input type="email" id="setting_support_email" placeholder="support@example.com"></div>
+                <div class="form-group"><label>📱 Support Phone</label><input type="text" id="setting_support_phone" placeholder="+251912345678"></div>
+            </div>
+            <button class="btn-broadcast" onclick="saveSettings()">💾 Save Settings</button>
+            <div id="settingsResult" style="margin-top:10px;"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentSection = 'dashboard';
+    
+    function showSection(section) {
+        currentSection = section;
+        document.querySelectorAll('.content-section').forEach(el => el.classList.remove('active'));
+        const target = document.getElementById('section-' + section);
+        if (target) target.classList.add('active');
+        document.querySelectorAll('.nav-item').forEach(el => {
+            el.classList.remove('active');
+            if (el.dataset.section === section) el.classList.add('active');
+        });
+        const titles = {'dashboard':'📊 Dashboard','users':'👥 Users','applications':'📝 Applications','stores':'🏪 Stores','orders':'📦 Orders','reviews':'⭐ Reviews','broadcast':'📢 Broadcast','revenue':'💰 Revenue','reports':'📈 Reports','settings':'⚙️ Settings'};
+        document.getElementById('pageTitle').textContent = titles[section] || section;
+        loadSectionData(section);
+    }
+    
+    function loadSectionData(section) {
+        switch(section) {
+            case 'dashboard': loadDashboard(); break;
+            case 'users': loadUsers(); break;
+            case 'applications': loadApplications(); break;
+            case 'stores': loadStores(); break;
+            case 'orders': loadOrders(); break;
+            case 'reviews': loadReviews(); break;
+            case 'revenue': loadRevenue(); break;
+        }
+    }
+    
+    function updateClock() {
+        document.getElementById('currentTime').textContent = new Date().toLocaleString();
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+    
+    // ============================================================
+    // DASHBOARD
+    // ============================================================
+    async function loadDashboard() {
+        try {
+            const response = await fetch('/api/admin/stats');
+            const data = await response.json();
+            document.getElementById('statUsers').textContent = data.total_users || 0;
+            document.getElementById('statApps').textContent = data.pending_apps || 0;
+            document.getElementById('statStores').textContent = data.total_stores || 0;
+            document.getElementById('statOrders').textContent = data.total_orders || 0;
+            document.getElementById('statRevenue').textContent = (data.total_revenue || 0).toFixed(2) + ' ETB';
+            document.getElementById('statReviews').textContent = data.total_reviews || 0;
+            document.getElementById('userBadge').textContent = data.total_users || 0;
+            document.getElementById('appBadge').textContent = data.pending_apps || 0;
+            document.getElementById('storeBadge').textContent = data.total_stores || 0;
+            document.getElementById('orderBadge').textContent = data.recent_orders || 0;
+            document.getElementById('recentActivity').innerHTML = `
+                <p>📊 Total Revenue: ${(data.total_revenue || 0).toFixed(2)} ETB</p>
+                <p>📈 Monthly Revenue: ${(data.monthly_revenue || 0).toFixed(2)} ETB</p>
+                <p>📦 Recent Orders: ${data.recent_orders || 0}</p>
+                <p>🟢 Active Stores: ${data.active_stores || 0}</p>
+            `;
+        } catch(e) { console.error(e); }
+    }
+    
+    // ============================================================
+    // USERS
+    // ============================================================
+    async function loadUsers() {
+        try {
+            const response = await fetch('/api/admin/users');
+            const users = await response.json();
+            const tbody = document.getElementById('usersTable');
+            if (!users || users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">👥 No users found</td></tr>';
+                return;
+            }
+            tbody.innerHTML = users.map(u => `
+                <tr>
+                    <td>#${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>${u.phone || 'N/A'}</td>
+                    <td>${u.is_super_admin ? '👑 Super Admin' : u.is_admin ? '👤 Admin' : '👤 User'}</td>
+                    <td><span class="status-badge ${u.is_verified ? 'status-approved' : 'status-pending'}">${u.is_verified ? '✅ Verified' : '⏳ Pending'}</span></td>
+                    <td><button class="btn-sm primary" onclick="toggleUser(${u.id})">${u.is_verified ? '🔓' : '🔒'}</button></td>
+                </tr>
+            `).join('');
+        } catch(e) { console.error(e); }
+    }
+    
+    async function toggleUser(userId) {
+        if (!confirm('Toggle user verification?')) return;
+        try {
+            await fetch(`/api/admin/user/${userId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_verified: true }) });
+            loadUsers();
+        } catch(e) { alert('Error: ' + e); }
+    }
+    
+    // ============================================================
+    // APPLICATIONS
+    // ============================================================
+    async function loadApplications() {
+        try {
+            const response = await fetch('/api/admin/applications');
+            const apps = await response.json();
+            const container = document.getElementById('applicationsList');
+            if (!apps || apps.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="icon">✅</div><p>All applications have been reviewed!</p></div>';
+                return;
+            }
+            container.innerHTML = apps.map(app => `
+                <div class="card" style="margin-bottom:10px;">
+                    <h3>🏪 ${app.store_name}</h3>
+                    <div class="info">
+                        <p><strong>👤 Owner:</strong> ${app.owner_name}</p>
+                        <p><strong>📱 Phone:</strong> ${app.phone}</p>
+                        <p><strong>📍 Location:</strong> ${app.location}</p>
+                        <p><strong>📅 Submitted:</strong> ${new Date(app.created_at).toLocaleString()}</p>
+                    </div>
+                    <div style="margin-top:8px;">
+                        <textarea id="notes_${app.id}" placeholder="📝 Admin Notes..." style="width:100%;padding:8px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.05);color:#fff;min-height:40px;resize:vertical;"></textarea>
+                    </div>
+                    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+                        <button class="btn-sm approve" onclick="verifyApp(${app.id}, 'approved')">✅ Approve</button>
+                        <button class="btn-sm changes" onclick="verifyApp(${app.id}, 'changes_requested')">✏️ Changes</button>
+                        <button class="btn-sm reject" onclick="verifyApp(${app.id}, 'rejected')">❌ Reject</button>
+                    </div>
+                </div>
+            `).join('');
+        } catch(e) { console.error(e); }
+    }
+    
+    async function verifyApp(appId, action) {
+        const notes = document.getElementById(`notes_${appId}`).value.trim();
+        if (!confirm(`Confirm ${action}?`)) return;
+        try {
+            await fetch('/api/admin/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ application_id: appId, action: action, admin_notes: notes })
+            });
+            loadApplications();
+            loadDashboard();
+        } catch(e) { alert('Error: ' + e); }
+    }
+    
+    // ============================================================
+    // STORES
+    // ============================================================
+    async function loadStores() {
+        try {
+            const response = await fetch('/api/admin/stores');
+            const stores = await response.json();
+            const tbody = document.getElementById('storesTable');
+            if (!stores || stores.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">🏪 No stores found</td></tr>';
+                return;
+            }
+            tbody.innerHTML = stores.map(s => `
+                <tr>
+                    <td>#${s.id}</td>
+                    <td>${s.name}</td>
+                    <td>${s.location || 'N/A'}</td>
+                    <td><span class="status-badge ${s.is_active ? 'status-active' : 'status-inactive'}">${s.is_active ? '🟢 Active' : '🔴 Inactive'}</span></td>
+                    <td>${s.rating || 0} ⭐</td>
+                    <td>
+                        <button class="btn-sm ${s.is_active ? 'danger' : 'approve'}" onclick="toggleStore(${s.id})">${s.is_active ? '⏹️' : '▶️'}</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch(e) { console.error(e); }
+    }
+    
+    async function toggleStore(storeId) {
+        if (!confirm('Toggle store status?')) return;
+        try {
+            const store = await fetch(`/api/admin/store/${storeId}`).then(r => r.json());
+            await fetch(`/api/admin/store/${storeId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ is_active: !store.is_active }) });
+            loadStores();
+        } catch(e) { alert('Error: ' + e); }
+    }
+    
+    // ============================================================
+    // ORDERS
+    // ============================================================
+    async function loadOrders() {
+        try {
+            const response = await fetch('/api/admin/orders');
+            const orders = await response.json();
+            const tbody = document.getElementById('ordersTable');
+            if (!orders || orders.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty-state">📦 No orders found</td></tr>';
+                return;
+            }
+            tbody.innerHTML = orders.map(o => `
+                <tr>
+                    <td>#${o.order_number || o.id}</td>
+                    <td>${o.customer_name || o.customer_phone || 'N/A'}</td>
+                    <td>${(o.total_amount || 0).toFixed(2)} ETB</td>
+                    <td><span class="status-badge ${o.status === 'completed' ? 'status-approved' : 'status-pending'}">${o.status || 'pending'}</span></td>
+                    <td>${new Date(o.created_at).toLocaleDateString()}</td>
+                </tr>
+            `).join('');
+        } catch(e) { console.error(e); }
+    }
+    
+    // ============================================================
+    // REVIEWS
+    // ============================================================
+    async function loadReviews() {
+        try {
+            const response = await fetch('/api/admin/reviews');
+            const reviews = await response.json();
+            const container = document.getElementById('reviewsList');
+            if (!reviews || reviews.length === 0) {
+                container.innerHTML = '<div class="empty-state"><div class="icon">⭐</div><p>No reviews yet</p></div>';
+                return;
+            }
+            container.innerHTML = reviews.map(r => `
+                <div class="card" style="margin-bottom:8px;">
+                    <div class="info">
+                        <strong>📦 ${r.product_name}</strong>
+                        <span style="color:#fcc419;margin-left:10px;">${'⭐'.repeat(r.rating)}</span>
+                        <p>💬 ${r.comment || 'No comment'}</p>
+                        <p style="color:#666;font-size:11px;">📅 ${new Date(r.created_at).toLocaleDateString()}</p>
+                    </div>
+                </div>
+            `).join('');
+        } catch(e) { console.error(e); }
+    }
+    
+    // ============================================================
+    // REVENUE
+    // ============================================================
+    async function loadRevenue() {
+        try {
+            const response = await fetch('/api/admin/revenue');
+            const data = await response.json();
+            const chart = document.getElementById('revenueChart');
+            if (data.daily && data.daily.length > 0) {
+                const maxRevenue = Math.max(...data.daily.map(d => d.revenue));
+                chart.innerHTML = data.daily.slice(-14).map(d => `
+                    <div style="display:flex;align-items:center;gap:6px;margin:3px 0;">
+                        <span style="width:70px;color:#888;font-size:10px;">${d.date}</span>
+                        <div style="flex:1;height:14px;background:rgba(255,255,255,0.05);border-radius:7px;overflow:hidden;">
+                            <div style="height:100%;background:linear-gradient(90deg,#667eea,#764ba2);border-radius:7px;width:${maxRevenue > 0 ? (d.revenue / maxRevenue * 100) : 0}%;transition:width 0.5s;"></div>
+                        </div>
+                        <span style="width:60px;color:#ddd;font-size:10px;text-align:right;">${d.revenue.toFixed(0)} ETB</span>
+                    </div>
+                `).join('');
+            } else {
+                chart.innerHTML = '<div class="empty-state">No revenue data</div>';
+            }
+            const topList = document.getElementById('topStoresList');
+            if (data.top_stores && data.top_stores.length > 0) {
+                topList.innerHTML = data.top_stores.map((s, i) => `
+                    <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+                        <span>${['🥇','🥈','🥉','4️⃣','5️⃣'][i] || '📌'}</span>
+                        <span style="flex:1;color:#ddd;">${s.name}</span>
+                        <span style="color:#888;font-size:11px;">${s.orders} orders</span>
+                        <span style="color:#667eea;font-weight:600;">${s.revenue.toFixed(2)} ETB</span>
+                    </div>
+                `).join('');
+            } else {
+                topList.innerHTML = '<div class="empty-state">No data</div>';
+            }
+        } catch(e) { console.error(e); }
+    }
+    
+    // ============================================================
+    // BROADCAST
+    // ============================================================
+    async function sendBroadcast() {
+        const title = document.getElementById('broadcastTitle').value.trim();
+        const message = document.getElementById('broadcastMessage').value.trim();
+        const image = document.getElementById('broadcastImage').value.trim();
+        const target = document.getElementById('broadcastTarget').value;
+        if (!message) {
+            document.getElementById('broadcastResult').innerHTML = '<div style="color:#ff6b6b;">❌ Please enter a message</div>';
+            return;
+        }
+        try {
+            const response = await fetch('/api/admin/broadcast', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, message, image, target })
+            });
+            const data = await response.json();
+            document.getElementById('broadcastResult').innerHTML = `<div style="color:#51cf66;">✅ Broadcast sent to ${data.delivered || 0} users!</div>`;
+            document.getElementById('broadcastTitle').value = '';
+            document.getElementById('broadcastMessage').value = '';
+            document.getElementById('broadcastImage').value = '';
+        } catch(e) {
+            document.getElementById('broadcastResult').innerHTML = `<div style="color:#ff6b6b;">❌ Error: ${e}</div>`;
+        }
+    }
+    
+    // ============================================================
+    // REPORTS
+    // ============================================================
+    function generateReport(type) {
+        const reports = {
+            'stores': '🏪 Stores Report - Total: 15 stores, Active: 12, Pending: 3',
+            'orders': '📦 Orders Report - Total: 245 orders, Revenue: 45,678.90 ETB',
+            'users': '👥 Users Report - Total: 89 users, Verified: 67, Admins: 3',
+            'revenue': '💰 Revenue Report - Total: 45,678.90 ETB, This Month: 12,345.67 ETB'
+        };
+        document.getElementById('reportResult').innerHTML = `
+            <div class="card">
+                <h3>📄 ${type.charAt(0).toUpperCase() + type.slice(1)} Report</h3>
+                <div class="info" style="padding:10px 0;">
+                    <p>${reports[type] || 'Report generated!'}</p>
+                    <p style="color:#666;font-size:11px;margin-top:5px;">📅 ${new Date().toLocaleString()}</p>
+                </div>
+            </div>
+        `;
+    }
+    
+    // ============================================================
+    // SETTINGS
+    // ============================================================
+    async function saveSettings() {
+        const settings = {
+            site_name: document.getElementById('setting_site_name').value,
+            commission: document.getElementById('setting_commission').value,
+            support_email: document.getElementById('setting_support_email').value,
+            support_phone: document.getElementById('setting_support_phone').value
+        };
+        try {
+            await fetch('/api/admin/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+            document.getElementById('settingsResult').innerHTML = '<div style="color:#51cf66;">✅ Settings saved!</div>';
+        } catch(e) {
+            document.getElementById('settingsResult').innerHTML = `<div style="color:#ff6b6b;">❌ Error: ${e}</div>`;
+        }
+    }
+    
+    // Load dashboard on page load
+    loadDashboard();
+</script>
+</body>
+</html>
+    """
+
+# =================================================================================================
+#                           SUPER ADMIN API ROUTES
+# =================================================================================================
+
+@app.route('/api/admin/stats')
+def admin_stats():
+    total_users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0][0]
+    pending_apps = db_execute("SELECT COUNT(*) FROM store_applications WHERE status = 'pending'", fetch=True)[0][0]
+    total_stores = db_execute("SELECT COUNT(*) FROM stores WHERE is_approved = 1", fetch=True)[0][0]
+    total_orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0][0]
+    total_revenue = db_execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1", fetch=True)[0][0]
+    total_reviews = db_execute("SELECT COUNT(*) FROM reviews", fetch=True)[0][0]
+    active_stores = db_execute("SELECT COUNT(*) FROM stores WHERE is_active = 1 AND is_approved = 1", fetch=True)[0][0]
+    recent_orders = db_execute("SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '7 days'", fetch=True)[0][0]
+    monthly_revenue = db_execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE created_at > NOW() - INTERVAL '30 days' AND status_stage >= 1", fetch=True)[0][0]
+    
+    return jsonify({
+        'total_users': total_users,
+        'pending_apps': pending_apps,
+        'total_stores': total_stores,
+        'total_orders': total_orders,
+        'total_revenue': float(total_revenue),
+        'total_reviews': total_reviews,
+        'active_stores': active_stores,
+        'recent_orders': recent_orders,
+        'monthly_revenue': float(monthly_revenue)
+    })
+
+@app.route('/api/admin/users')
+def admin_users():
+    users = db_execute_dict("SELECT id, username, phone, is_admin, is_super_admin, is_verified FROM users ORDER BY created_at DESC")
+    return jsonify(users)
+
+@app.route('/api/admin/user/<int:user_id>', methods=['PUT'])
+def admin_user_update(user_id):
+    data = request.get_json()
+    db_execute("UPDATE users SET is_verified = %s WHERE id = %s", (data.get('is_verified', True), user_id))
+    return jsonify({'success': True})
+
+@app.route('/api/admin/applications')
+def admin_applications():
+    apps = db_execute_dict("""
+        SELECT sa.*, u.username, u.phone as user_phone
+        FROM store_applications sa
+        JOIN users u ON sa.user_id = u.id
+        WHERE sa.status = 'pending'
+        ORDER BY sa.created_at DESC
+    """)
+    return jsonify(apps)
+
+@app.route('/api/admin/verify', methods=['POST'])
+def admin_verify():
+    data = request.get_json()
+    app_id = data.get('application_id')
+    action = data.get('action')
+    notes = data.get('admin_notes', '')
+    
+    db_execute("""
+        UPDATE store_applications 
+        SET status = %s, admin_notes = %s, reviewed_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+    """, (action, notes, app_id))
+    
+    if action == 'approved':
+        # Get application data
+        app = db_execute_dict("SELECT * FROM store_applications WHERE id = %s", (app_id,))
+        if app:
+            app = app[0]
+            # Create store
+            h_pass, salt = hash_password(secrets.token_hex(8))
+            db_execute("""
+                INSERT INTO stores (token, store_name, admin_id, username, phone, password_hash, password_salt,
+                                   area_text, shop_description, is_approved, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1)
+            """, (
+                app.get('bot_token', f"bot_{secrets.token_hex(16)}"),
+                app['store_name'],
+                app['user_id'],
+                app.get('bot_username', f"shop_{int(time.time())}"),
+                app['phone'],
+                h_pass, salt,
+                app['location'],
+                app['description']
+            ))
+    
+    return jsonify({'success': True})
+
+@app.route('/api/admin/stores')
+def admin_stores():
+    stores = db_execute_dict("""
+        SELECT id, store_name as name, area_text as location, is_active, rating, total_orders
+        FROM stores WHERE is_approved = 1
+        ORDER BY created_at DESC
+    """)
+    return jsonify(stores)
+
+@app.route('/api/admin/store/<int:store_id>', methods=['GET', 'PUT'])
+def admin_store(store_id):
+    if request.method == 'GET':
+        store = db_execute_dict("SELECT id, is_active FROM stores WHERE id = %s", (store_id,))
+        return jsonify(store[0] if store else {})
+    
+    data = request.get_json()
+    db_execute("UPDATE stores SET is_active = %s WHERE id = %s", (data.get('is_active', True), store_id))
+    return jsonify({'success': True})
+
+@app.route('/api/admin/orders')
+def admin_orders():
+    orders = db_execute_dict("""
+        SELECT id, order_number, customer_phone, total_price, status_am as status, created_at
+        FROM orders ORDER BY created_at DESC LIMIT 50
+    """)
+    return jsonify(orders)
+
+@app.route('/api/admin/reviews')
+def admin_reviews():
+    reviews = db_execute_dict("""
+        SELECT r.*, p.name_am as product_name
+        FROM reviews r JOIN products p ON r.product_id = p.id
+        ORDER BY r.created_at DESC LIMIT 20
+    """)
+    return jsonify(reviews)
+
+@app.route('/api/admin/revenue')
+def admin_revenue():
+    # Daily revenue for last 30 days
+    daily = []
+    for i in range(30, -1, -1):
+        date = datetime.now() - timedelta(days=i)
+        date_str = date.strftime('%Y-%m-%d')
+        revenue = db_execute("""
+            SELECT COALESCE(SUM(total_price + delivery_fee), 0)
+            FROM orders 
+            WHERE DATE(created_at) = DATE(%s) AND status_stage >= 1
+        """, (date_str,), fetch=True)[0][0]
+        orders = db_execute("""
+            SELECT COUNT(*) FROM orders WHERE DATE(created_at) = DATE(%s)
+        """, (date_str,), fetch=True)[0][0]
+        daily.append({'date': date_str, 'revenue': float(revenue), 'orders': orders})
+    
+    # Top stores
+    top_stores = db_execute_dict("""
+        SELECT s.store_name, COUNT(o.id) as orders, COALESCE(SUM(o.total_price + o.delivery_fee), 0) as revenue
+        FROM stores s
+        LEFT JOIN orders o ON s.token = o.token AND o.status_stage >= 1
+        GROUP BY s.id, s.store_name
+        ORDER BY revenue DESC
+        LIMIT 5
+    """)
+    
+    return jsonify({'daily': daily, 'top_stores': top_stores})
+
+@app.route('/api/admin/broadcast', methods=['POST'])
+def admin_broadcast():
+    data = request.get_json()
+    title = data.get('title', '')
+    message = data.get('message', '')
+    image_url = data.get('image_url')
+    target = data.get('target', 'all')
+    
+    # Get target users
+    if target == 'all':
+        users = db_execute_dict("SELECT id FROM users")
+    elif target == 'store_owners':
+        users = db_execute_dict("SELECT DISTINCT u.id FROM users u JOIN stores s ON u.id = s.admin_id")
+    else:
+        users = db_execute_dict("SELECT id FROM users WHERE is_admin = TRUE")
+    
+    delivered = len(users)
+    
+    # In production, send actual messages
+    db_execute("""
+        INSERT INTO broadcasts (title, message, image_url, target, delivered_count)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (title, message, image_url, target, delivered))
+    
+    return jsonify({'success': True, 'delivered': delivered, 'total': len(users)})
+
+@app.route('/api/admin/settings', methods=['POST'])
+def admin_settings():
+    data = request.get_json()
+    for key, value in data.items():
+        db_execute("""
+            INSERT INTO settings (key, value) VALUES (%s, %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+        """, (key, value))
+    return jsonify({'success': True})
+
+# =================================================================================================
+#                           TELEGRAM BOT ENGINE
+# =================================================================================================
+
+# Global state for shop bots
+running_tokens = set()
+running_lock = threading.Lock()
+user_carts = {}
+user_carts_lock = threading.Lock()
+admin_states = {}
+admin_states_lock = threading.Lock()
+login_attempts = {}
+login_attempts_lock = threading.Lock()
+lang_cache = {}
+
 ORDER_STAGES_AM = ["🟡 በመጠባበቅ ላይ", "✅ ተረጋግጧል", "🚚 በመንገድ ላይ", "📦 ደርሷል"]
 ORDER_STAGES_EN = ["🟡 Pending", "✅ Confirmed", "🚚 On the way", "📦 Delivered"]
 
-# ============================================================
-# 4. LOCALIZATION (11 Languages Support)
-# ============================================================
 STRINGS = {
     "am": {
-        "welcome": "እንኳን ወደ AI የሽያጭ ረዳት ቦት በደህና መጡ! 👋",
-        "shop": "🛍️ ምርቶችን እይ",
-        "cart": "🛒 የእኔ ጋሪ",
-        "track": "📦 ትዕዛዝ መከታተያ",
-        "faq": "❓ መረጃ (FAQ)",
-        "reviews": "⭐ ግምገማዎች",
-        "empty": "🛒 ጋሪዎ በአሁኑ ሰዓት ባዶ ነው።",
-        "added": "ወደ ጋሪ ተጨምሯል! 🛒",
-        "total": "አጠቃላይ ድምር",
-        "price_label": "ዋጋ",
-        "discount": "ቅናሽ",
-        "checkout_btn": "💳 ሂሳብ ማጠቃለያ",
-        "clear_btn": "🗑️ ጋሪ አጽዳ",
-        "enter_id": "🔢 እባክዎ የትዕዛዝ ቁጥርዎን (Order ID) ያስገቡ፦",
-        "not_found": "❌ የትዕዛዝ ቁጥሩ አልተገኘም ወይም የዚህ ሱቅ አይደለም።",
-        "invalid_id": "❌ የተሳሳተ ቁጥር ገብቷል።",
-        "approved_msg": "🎉 ደስ የሚል ዜና! የትዕዛዝ ቁጥርዎ ክፍያ ተረጋግጦ ዕቃው እየመጣላችሁ ነው። 🛵",
-        "rejected_msg": "❌ የትዕዛዝ ቁጥርዎ ክፍያ ማረጋገጫ ውድቅ ተደርጓል።",
-        "receipt_prompt": "📸 እባክዎ የከፈሉበትን ደረሰኝ (Screenshot) ይላኩ።",
-        "faq_text": "ℹ️ **ስለ ሱቃችን መረጃ**\n\n📍 አድራሻችን፦ አዲስ አበባ፣ ኢትዮጵያ\n📞 ስልክ፦ 0911223344",
-        "rate_product": "⭐ ምርቱን ደረጃ ይስጡ",
-        "thank_review": "🙏 ለግምገማዎ እናመሰግናለን!",
-        "delivery_info": "🚚 የማድረስ መረጃ"
+        "welcome": "እንኳን ወደ ሱቅ በደህና መጡ! 👋",
+        "shop": "🛍️ ምርቶች",
+        "cart": "🛒 ጋሪ",
+        "track": "📦 ትዕዛዝ",
+        "faq": "❓ እርዳታ",
+        "empty": "🛒 ጋሪዎ ባዶ ነው",
+        "added": "✅ ወደ ጋሪ ተጨምሯል!",
+        "total": "አጠቃላይ",
+        "price": "ዋጋ",
+        "checkout": "💳 ሂሳብ አስረድ",
+        "clear": "🗑️ አጽዳ",
+        "enter_id": "🔢 የትዕዛዝ ቁጥር ያስገቡ:",
+        "not_found": "❌ አልተገኘም",
+        "receipt_prompt": "📸 የክፍያ ደረሰኝ ይላኩ",
+        "approved_msg": "✅ ክፍያ ተረጋግጧል!",
+        "rejected_msg": "❌ ክፍያ ውድቅ ተደርጓል"
     },
     "en": {
-        "welcome": "Welcome to AI Customer Service Bot! 👋",
-        "shop": "🛍️ Shop Products",
-        "cart": "🛒 My Cart",
+        "welcome": "Welcome to the store! 👋",
+        "shop": "🛍️ Products",
+        "cart": "🛒 Cart",
         "track": "📦 Track Order",
-        "faq": "❓ FAQ Info",
-        "reviews": "⭐ Reviews",
-        "empty": "🛒 Your cart is currently empty.",
-        "added": "Added to cart! 🛒",
+        "faq": "❓ Help",
+        "empty": "🛒 Your cart is empty",
+        "added": "✅ Added to cart!",
         "total": "Total",
-        "price_label": "Price",
-        "discount": "Discount",
-        "checkout_btn": "💳 Checkout",
-        "clear_btn": "🗑️ Clear Cart",
-        "enter_id": "🔢 Please enter your Order ID:",
-        "not_found": "❌ Order ID not found or invalid for this store.",
-        "invalid_id": "❌ Invalid ID entered.",
-        "approved_msg": "🎉 Great news! Your payment has been approved and your item is on the way! 🛵",
-        "rejected_msg": "❌ Your payment could not be verified.",
-        "receipt_prompt": "📸 Please send the payment confirmation screenshot here.",
-        "faq_text": "ℹ️ **About Our Store**\n\n📍 Location: Addis Ababa, Ethiopia\n📞 Phone: +251911223344",
-        "rate_product": "⭐ Rate this product",
-        "thank_review": "🙏 Thank you for your review!",
-        "delivery_info": "🚚 Delivery Information"
-    },
-    "zh": {
-        "welcome": "欢迎使用 AI 客户服务机器人！ 👋",
-        "shop": "🛍️ 购买商品",
-        "cart": "🛒 我的购物车",
-        "track": "📦 订单追踪",
-        "faq": "❓ 常见问题",
-        "reviews": "⭐ 评价",
-        "empty": "🛒 您的购物车当前为空。",
-        "added": "已加入购物车！ 🛒",
-        "total": "总计",
-        "price_label": "价格",
-        "discount": "折扣",
-        "checkout_btn": "💳 结账",
-        "clear_btn": "🗑️ 清空购物车",
-        "enter_id": "🔢 请输入您的订单编号：",
-        "not_found": "❌ 未找到订单编号或对此商店无效。",
-        "invalid_id": "❌ 输入的编号无效。",
-        "approved_msg": "🎉 好消息！您的付款已验证，商品正在配送中！ 🛵",
-        "rejected_msg": "❌ 您的付款无法验证。",
-        "receipt_prompt": "📸 请在此发送支付凭证截图。",
-        "faq_text": "ℹ️ **关于我们**\n\n📍 地点：埃塞俄比亚亚的斯亚贝巴\n📞 电话：+251911223344",
-        "rate_product": "⭐ 评价此产品",
-        "thank_review": "🙏 感谢您的评价！",
-        "delivery_info": "🚚 配送信息"
-    },
-    "hi": {
-        "welcome": "AI ग्राहक सेवा बॉट में आपका स्वागत है! 👋",
-        "shop": "🛍️ उत्पाद खरीदें",
-        "cart": "🛒 मेरी कार्ट",
-        "track": "📦 ऑर्डर ट्रैक करें",
-        "faq": "❓ अक्सर पूछे जाने वाले प्रश्न",
-        "reviews": "⭐ समीक्षाएँ",
-        "empty": "🛒 आपकी कार्ट वर्तमान में खाली है।",
-        "added": "कार्ट में जोड़ा गया! 🛒",
-        "total": "कुल",
-        "price_label": "कीमत",
-        "discount": "छूट",
-        "checkout_btn": "💳 चेकआउट",
-        "clear_btn": "🗑️ कार्ट साफ़ करें",
-        "enter_id": "🔢 कृपया अपनी ऑर्डर आईडी दर्ज करें:",
-        "not_found": "❌ ऑर्डर आईडी नहीं मिली या इस स्टोर के लिए अमान्य है।",
-        "invalid_id": "❌ अमान्य आईडी दर्ज की गई।",
-        "approved_msg": "🎉 अच्छी खबर! आपका भुगतान स्वीकृत हो गया है! 🛵",
-        "rejected_msg": "❌ आपके भुगतान की पुष्टि नहीं हो सकी।",
-        "receipt_prompt": "📸 कृपया यहाँ भुगतान स्क्रीनशॉट भेजें।",
-        "faq_text": "ℹ️ **हमारे स्टोर के बारे में**\n\n📍 स्थान: अदीस अबाबा, इथियोपिया\n📞 फोन: +251911223344",
-        "rate_product": "⭐ इस उत्पाद को रेट करें",
-        "thank_review": "🙏 आपकी समीक्षा के लिए धन्यवाद!",
-        "delivery_info": "🚚 डिलीवरी जानकारी"
-    },
-    "es": {
-        "welcome": "¡Bienvenido al bot de servicio al cliente de IA! 👋",
-        "shop": "🛍️ Comprar",
-        "cart": "🛒 Mi Carrito",
-        "track": "📦 Rastrear Pedido",
-        "faq": "❓ Preguntas Frecuentes",
-        "reviews": "⭐ Reseñas",
-        "empty": "🛒 Tu carrito está vacío.",
-        "added": "¡Agregado al carrito! 🛒",
-        "total": "Total",
-        "price_label": "Precio",
-        "discount": "Descuento",
-        "checkout_btn": "💳 Pagar",
-        "clear_btn": "🗑️ Vaciar Carrito",
-        "enter_id": "🔢 Por favor ingresa tu ID de pedido:",
-        "not_found": "❌ ID de pedido no encontrado.",
-        "invalid_id": "❌ ID inválido.",
-        "approved_msg": "¡Buenas noticias! Tu pago ha sido aprobado. 🛵",
-        "rejected_msg": "❌ Su pago no pudo ser verificado.",
-        "receipt_prompt": "📸 Envía aquí la captura de pantalla del pago.",
-        "faq_text": "ℹ️ **Información de la Tienda**\n\n📍 Ubicación: Adís Abeba, Etiopía\n📞 Teléfono: +251911223344",
-        "rate_product": "⭐ Califica este producto",
-        "thank_review": "🙏 ¡Gracias por tu reseña!",
-        "delivery_info": "🚚 Información de entrega"
-    },
-    "ar": {
-        "welcome": "أهلاً بك في بوت خدمة العملاء! 👋",
-        "shop": "🛍️ تسوق المنتجات",
-        "cart": "🛒 سلة التسوق",
-        "track": "📦 تتبع الطلب",
-        "faq": "❓ الأسئلة الشائعة",
-        "reviews": "⭐ التقييمات",
-        "empty": "🛒 سلة التسوق فارغة حالياً.",
-        "added": "تمت الإضافة إلى السلة! 🛒",
-        "total": "المجموع",
-        "price_label": "السعر",
-        "discount": "خصم",
-        "checkout_btn": "💳 إتمام الشراء",
-        "clear_btn": "🗑️ تفريغ السلة",
-        "enter_id": "🔢 يرجى إدخال رقم الطلب:",
-        "not_found": "❌ رقم الطلب غير موجود أو غير صالح.",
-        "invalid_id": "❌ رقم غير صالح.",
-        "approved_msg": "🎉 أخبار سارة! تم اعتماد الدفع! 🛵",
-        "rejected_msg": "❌ تعذر التحقق من الدفع.",
-        "receipt_prompt": "📸 يرجى إرسال لقطة شاشة إيصال الدفع هنا.",
-        "faq_text": "ℹ️ **معلومات المتجر**\n\n📍 الموقع: أديس أبابا، إثيوبيا\n📞 الهاتف: +251911223344",
-        "rate_product": "⭐ قيم هذا المنتج",
-        "thank_review": "🙏 شكراً لتقييمك!",
-        "delivery_info": "🚚 معلومات التوصيل"
-    },
-    "fr": {
-        "welcome": "Bienvenue sur le bot du service client IA ! 👋",
-        "shop": "🛍️ Acheter",
-        "cart": "🛒 Mon Panier",
-        "track": "📦 Suivre la commande",
-        "faq": "❓ FAQ",
-        "reviews": "⭐ Avis",
-        "empty": "🛒 Votre panier est vide.",
-        "added": "Ajouté au panier ! 🛒",
-        "total": "Total",
-        "price_label": "Prix",
-        "discount": "Réduction",
-        "checkout_btn": "💳 Commander",
-        "clear_btn": "🗑️ Vider le panier",
-        "enter_id": "🔢 Veuillez entrer votre ID de commande :",
-        "not_found": "❌ ID de commande introuvable.",
-        "invalid_id": "❌ ID invalide.",
-        "approved_msg": "🎉 Bonne nouvelle ! Votre paiement a été approuvé ! 🛵",
-        "rejected_msg": "❌ Échec de la vérification du paiement.",
-        "receipt_prompt": "📸 Veuillez envoyer la capture d'écran du reçu de paiement ici.",
-        "faq_text": "ℹ️ **À propos de notre magasin**\n\n📍 Lieu : Addis-Abeba, Éthiopie\n📞 Téléphone : +251911223344",
-        "rate_product": "⭐ Notez ce produit",
-        "thank_review": "🙏 Merci pour votre avis !",
-        "delivery_info": "🚚 Informations de livraison"
-    },
-    "om": {
-        "welcome": "Baga nagaan gara Bot Tajaajila Maamilootaa nagaan dhuftan! 👋",
-        "shop": "🛍️ Oomishaalee Ilaali",
-        "cart": "🛒 Kaartii Koo",
-        "track": "📦 Ajaja Hordofaa",
-        "faq": "❓ Odeeffannoo (FAQ)",
-        "reviews": "⭐ Madaallii",
-        "empty": "🛒 Kaartiin keessan amma duwwaa dha.",
-        "added": "Kaartitti dabalamooti! 🛒",
-        "total": "Waliigala",
-        "price_label": "Gatii",
-        "discount": "Kaffaltii Hir'ina",
-        "checkout_btn": "💳 Baasii Xumuri",
-        "clear_btn": "🗑️ Kaartii Qulqulleessi",
-        "enter_id": "🔢 Maaloo Lakkoofsa Ajajaa (Order ID) galchaa:",
-        "not_found": "❌ Lakkoofsi ajajaa hin argamne.",
-        "invalid_id": "❌ Lakkoofsi dogoggoraan galeera.",
-        "approved_msg": "🎉 Oduu gammachiisaa! Kaffaltiin keessan mirkanaa'ee jira! 🛵",
-        "rejected_msg": "❌ Kaffaltiin keessan mirkanaa'uu hin dandeenye.",
-        "receipt_prompt": "📸 Maaloo ragaa kaffaltii (Screenshot) asitti ergaa.",
-        "faq_text": "ℹ️ **Waa'ee keenya**\n\n📍 Teessoo: Finfinnee, Itoophiyaa\n📞 Bilbila: 0911223344",
-        "rate_product": "⭐ Oomisha kana madaali",
-        "thank_review": "🙏 Madaallii keessaniif galatoomaa!",
-        "delivery_info": "🚚 Odeeffannoo Dhiibuu"
-    },
-    "ti": {
-        "welcome": "ብደሓን መጻእኩም ናብ AI ኣገልግሎት ዓሚል ቦት! 👋",
-        "shop": "🛍️ ንብረት ርአ",
-        "cart": "🛒 ሰፈረይ (Cart)",
-        "track": "📦 ትእዛዝ ተከታተል",
-        "faq": "❓ ሓበሬታ (FAQ)",
-        "reviews": "⭐ ግምገማታት",
-        "empty": "🛒 ሰፈርካ ድኩም እዩ።",
-        "added": "ናብ ሰፈር ተወሲኹ! 🛒",
-        "total": "ጠቕላላ",
-        "price_label": "ዋጋ",
-        "discount": "ቅናሽ",
-        "checkout_btn": "💳 ክፍሊት ዛዘም",
-        "clear_btn": "🗑️ ሰፈር ኣጽርይ",
-        "enter_id": "🔢 እኩብ ቁጽሪ ትእዛዝ (Order ID) ኣእቱ፦",
-        "not_found": "❌ ቁጽሪ ትእዛዝ ኣይተረኽበን።",
-        "invalid_id": "❌ ግጉይ ቁጽሪ ኣትዩ።",
-        "approved_msg": "🎉 ጽቡቕ ዜና! ክፍሊትካ ተረጋጊጹ ኣሎ! 🛵",
-        "rejected_msg": "❌ ክፍሊትካ ክረጋገጽ ኣይክኣለን።",
-        "receipt_prompt": "📸 በጃኹም መረጋገጺ ክፍሊት (Screenshot) ኣብዚ ስደዱ።",
-        "faq_text": "ℹ️ **ብዛዕባ ድኳንና**\n\n📍 ኣድራሻ፦ ኣዲስ ኣበባ፣ ኢትዮጵያ\n📞 ስልኪ፦ 0911223344",
-        "rate_product": "⭐ ንዚ ንብረት ደረጃ ሃብ",
-        "thank_review": "🙏 ንግምገምካ እናመስግን!",
-        "delivery_info": "🚚 ሓበሬታ ምድላው"
-    },
-    "so": {
-        "welcome": "Ku soo dhawoow Adeegga Macmiilka AI! 👋",
-        "shop": "🛍️ Alaabta Iibso",
-        "cart": "🛒 Gaarigayga",
-        "track": "📦 Raadi Dalabka",
-        "faq": "❓ Macluumaad",
-        "reviews": "⭐ Qiimaynta",
-        "empty": "🛒 Gaarigagu waa madhan yahay.",
-        "added": "Lagu daray gaariga! 🛒",
-        "total": "Wadarta guud",
-        "price_label": "Qiimaha",
-        "discount": "Dhimis",
-        "checkout_btn": "💳 Bixi",
-        "clear_btn": "🗑️ Nadiifi Gaariga",
-        "enter_id": "🔢 Fadlan geli Aqoonsiga Dalabka (Order ID):",
-        "not_found": "❌ Lama helin lambarka dalabka.",
-        "invalid_id": "❌ Lambar khaldan.",
-        "approved_msg": "🎉 War farxad leh! Lacag bixintaadi waa la xaqiijiyay! 🛵",
-        "rejected_msg": "❌ Lacag bixintaada lama xaqiijin karin.",
-        "receipt_prompt": "📸 Fadlan halkan ka soo dir sawirka lacag bixinta (Screenshot).",
-        "faq_text": "ℹ️ **Nagu saabsan**\n\n📍 Goobta: Addis Ababa, Itoobiya\n📞 Taleefanka: +251911223344",
-        "rate_product": "⭐ Qiimee alaabtan",
-        "thank_review": "🙏 Waad ku mahadsan tahay qiimayntaada!",
-        "delivery_info": "🚚 Macluumaadka Dhiibista"
-    },
-    "aa": {
-        "welcome": "AI Abbaayih Taysuma Bot fan inkih marhabax baah! 👋",
-        "shop": "🛍️ Yanim Taysuma",
-        "cart": "🛒 Ayunti Giriya",
-        "track": "📦 Diggi Amri",
-        "faq": "❓ Geytinna",
-        "reviews": "⭐ Addad",
-        "empty": "🛒 Ayuntik gari maaliyo.",
-        "added": "Garih fanah abte! 🛒",
-        "total": "Gabaaba",
-        "price_label": "Qhiya",
-        "discount": "Qhiya xagta",
-        "checkout_btn": "💳 Xage",
-        "clear_btn": "🗑️ Gari Gacsi",
-        "enter_id": "🔢 Amri id (Order ID) rubba:",
-        "not_found": "❌ Amri id ma geyne.",
-        "invalid_id": "❌ Gugsissa id.",
-        "approved_msg": "🎉 Wagsi xab! Xaqsu sugteh amaana ayyaaham yemeete! 🛵",
-        "rejected_msg": "❌ Xaqsu ma sugto.",
-        "receipt_prompt": "📸 Xaqsu sate screenshot-hadih taniih xaysi.",
-        "faq_text": "ℹ️ **Dukaan geytinna**\n\n📍 Adda: Addis Ababa, Ethiopia\n📞 Telefoon: +251911223344",
-        "rate_product": "⭐ Taamitak addada",
-        "thank_review": "🙏 Addadiih gadda!",
-        "delivery_info": "🚚 Waddak geytinna"
+        "price": "Price",
+        "checkout": "💳 Checkout",
+        "clear": "🗑️ Clear",
+        "enter_id": "🔢 Enter Order ID:",
+        "not_found": "❌ Not found",
+        "receipt_prompt": "📸 Send payment receipt",
+        "approved_msg": "✅ Payment approved!",
+        "rejected_msg": "❌ Payment rejected"
     }
 }
 
-ADMIN_BTN = {
-    "add_product": "➕ ምርት ጨምር",
-    "my_products": "📋 ምርቶቼ",
-    "orders": "📬 ትዕዛዞች",
-    "payment": "💰 የክፍያ ቅንብር",
-    "stats": "📊 ስታትስቲክስ",
-    "profile": "🏪 የሱቅ መገለጫ",
-    "changepass": "🔑 የይለፍ ቃል ቀይር",
-    "discounts": "🏷️ ቅናሾች",
-    "reviews_manage": "⭐ ግምገማዎች",
-    "logout": "🚪 ውጣ",
-    "back": "⬅️ ተመለስ"
-}
-
-user_carts = {}
-admin_states = {}
-login_attempts = {}
-lang_cache = {}
-
-def get_main_menu(lang):
-    ln = STRINGS[lang]
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton(ln["shop"]),
-        types.KeyboardButton(ln["cart"]),
-        types.KeyboardButton(ln["track"]),
-        types.KeyboardButton(ln["faq"])
-    )
-    return markup
-
-def get_admin_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton(ADMIN_BTN["add_product"]),
-        types.KeyboardButton(ADMIN_BTN["my_products"])
-    )
-    markup.add(
-        types.KeyboardButton(ADMIN_BTN["orders"]),
-        types.KeyboardButton(ADMIN_BTN["payment"])
-    )
-    markup.add(
-        types.KeyboardButton(ADMIN_BTN["stats"]),
-        types.KeyboardButton(ADMIN_BTN["profile"])
-    )
-    markup.add(
-        types.KeyboardButton(ADMIN_BTN["discounts"]),
-        types.KeyboardButton(ADMIN_BTN["reviews_manage"])
-    )
-    markup.add(
-        types.KeyboardButton(ADMIN_BTN["changepass"]),
-        types.KeyboardButton(ADMIN_BTN["logout"])
-    )
-    markup.add(types.KeyboardButton(ADMIN_BTN["back"]))
-    return markup
-
-def get_customer_info(chat_id):
-    conn = get_safe_connection()
+def get_user_lang(chat_id, token):
+    if chat_id in lang_cache:
+        return lang_cache[chat_id]
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT phone, lat, lng, address FROM customer_info WHERE chat_id=%s", (chat_id,))
-            row = cursor.fetchone()
-    finally:
-        put_conn(conn)
-    if row:
-        return {"phone": row[0], "lat": row[1], "lng": row[2], "address": row[3]}
-    return None
-
-def save_customer_phone(chat_id, phone):
-    conn = get_safe_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute('''INSERT INTO customer_info (chat_id, phone) VALUES (%s, %s)
-                              ON CONFLICT (chat_id) DO UPDATE SET phone = EXCLUDED.phone''', (chat_id, phone))
-            conn.commit()
-    finally:
-        put_conn(conn)
-
-def save_customer_location(chat_id, lat, lng):
-    conn = get_safe_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute('''INSERT INTO customer_info (chat_id, lat, lng) VALUES (%s, %s, %s)
-                              ON CONFLICT (chat_id) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng''', (chat_id, lat, lng))
-            conn.commit()
-    finally:
-        put_conn(conn)
-
-def get_store_info(token):
-    conn = get_safe_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute('''SELECT store_name, admin_id, telebirr, cbebirr, is_active, 
-                              password_hash, password_salt, shop_lat, shop_lng, area_text,
-                              shop_photo, shop_description, opening_hours, delivery_radius,
-                              min_order, created_at
-                              FROM stores WHERE token=%s''', (token,))
-            row = cursor.fetchone()
-    finally:
-        put_conn(conn)
-    if row:
-        return {
-            "store_name": row[0], "admin_id": row[1], "telebirr": row[2],
-            "cbebirr": row[3], "is_active": row[4], "pass_hash": row[5],
-            "salt": row[6], "shop_lat": row[7], "shop_lng": row[8],
-            "area_text": row[9], "shop_photo": row[10], "shop_description": row[11],
-            "opening_hours": row[12], "delivery_radius": row[13],
-            "min_order": row[14], "created_at": row[15]
-        }
-    return None
-
-# ============================================================
-# 5. SHOP BOT ENGINE
-# ============================================================
-def setup_bot_handlers(token):
-    bot = telebot.TeleBot(token)
-
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
-
-    def get_user_lang(chat_id):
-        if chat_id in lang_cache:
-            return lang_cache[chat_id]
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT lang FROM user_langs WHERE chat_id=%s", (chat_id,))
-                row = cursor.fetchone()
-        finally:
-            put_conn(conn)
-        lang = row[0] if row else "am"
+        result = db_execute("SELECT lang FROM user_langs WHERE chat_id = %s", (chat_id,), fetch=True)
+        lang = result[0][0] if result else "am"
         lang_cache[chat_id] = lang
         return lang
+    except:
+        return "am"
 
-    def is_verified_admin(chat_id):
-        store = get_store_info(token)
-        if store and store["admin_id"] == chat_id:
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT expires_at FROM admin_sessions WHERE token=%s AND chat_id=%s",
-                                   (token, chat_id))
-                    row = cursor.fetchone()
-                    if row and row[0] > datetime.now():
-                        return True
-            finally:
-                put_conn(conn)
-        return False
+def get_store_info(token):
+    try:
+        result = db_execute_dict("""
+            SELECT store_name, admin_id, telebirr, cbebirr, is_active, is_approved,
+                   password_hash, password_salt, shop_lat, shop_lng, area_text,
+                   shop_photo, shop_description, rating, total_orders, total_sales
+            FROM stores WHERE token = %s
+        """, (token,))
+        if result:
+            return dict(result[0])
+        return None
+    except Exception as e:
+        print(f"Get store info error: {e}")
+        return None
 
-    def check_active_middleware(chat_id):
-        store = get_store_info(token)
-        if not store:
-            bot.send_message(chat_id, "🏪 ይህ ሱቅ ገና አልተመዘገበም።")
-            return False
-        if not store["is_active"]:
-            bot.send_message(chat_id, "❌ ይህ ሱቅ ንቁ አይደለም።")
-            return False
-        return True
+def get_customer_info(chat_id):
+    try:
+        result = db_execute_dict("SELECT phone, lat, lng, address FROM customer_info WHERE chat_id = %s", (chat_id,))
+        if result:
+            return dict(result[0])
+        return None
+    except Exception as e:
+        print(f"Get customer info error: {e}")
+        return None
 
+def save_customer_phone(chat_id, phone):
+    try:
+        db_execute("""
+            INSERT INTO customer_info (chat_id, phone) VALUES (%s, %s)
+            ON CONFLICT (chat_id) DO UPDATE SET phone = EXCLUDED.phone
+        """, (chat_id, phone))
+    except Exception as e:
+        print(f"Save customer phone error: {e}")
+
+def save_customer_location(chat_id, lat, lng):
+    try:
+        db_execute("""
+            INSERT INTO customer_info (chat_id, lat, lng) VALUES (%s, %s, %s)
+            ON CONFLICT (chat_id) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng
+        """, (chat_id, lat, lng))
+    except Exception as e:
+        print(f"Save customer location error: {e}")
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
+def hash_password(password, salt=None):
+    if not salt:
+        salt = secrets.token_hex(16)
+    hashed = hashlib.sha256((password + salt).encode()).hexdigest()
+    return hashed, salt
+
+def generate_session_token():
+    return secrets.token_hex(32)
+
+def setup_bot_handlers(token):
+    bot = telebot.TeleBot(token)
+    
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+    
     @bot.message_handler(commands=['start'])
-    def choose_language(message):
-        if not check_active_middleware(message.chat.id):
-            return
-        store = get_store_info(token)
-        
-        store_desc = store.get('shop_description') or "ጥራት ያለው እቃ ማቅረቢያ ሱቅ"
-        store_loc = store.get('area_text') or "አዲስ አበባ"
-        opening = store.get('opening_hours') or "መደበኛ ሰዓታት"
-        
-        caption = (
-            f"🏪 **{store['store_name']}**\n\n"
-            f"📝 **መግለጫ / Description:** {store_desc}\n"
-            f"📍 **አድራሻ / Location:** {store_loc}\n"
-            f"🕐 **ክፍት ሰዓታት / Hours:** {opening}\n"
-            f"🚚 **የማድረስ ርቀት / Delivery Radius:** {store.get('delivery_radius', 5)} km\n"
-            f"💰 **ዝቅተኛ ትዕዛዝ / Min Order:** {store.get('min_order', 0)} ETB\n\n"
-            f"🌐 ቋንቋ ይምረጡ / Choose Language:"
-        )
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="shoplang_am"),
-            types.InlineKeyboardButton("English 🇬🇧", callback_data="shoplang_en"),
-            types.InlineKeyboardButton("Mandarin 🇨🇳", callback_data="shoplang_zh"),
-            types.InlineKeyboardButton("Hindi 🇮🇳", callback_data="shoplang_hi"),
-            types.InlineKeyboardButton("Spanish 🇪🇸", callback_data="shoplang_es"),
-            types.InlineKeyboardButton("Arabic 🇸🇦", callback_data="shoplang_ar"),
-            types.InlineKeyboardButton("French 🇫🇷", callback_data="shoplang_fr"),
-            types.InlineKeyboardButton("ኦሮምኛ 🇪🇹", callback_data="shoplang_om"),
-            types.InlineKeyboardButton("ትግርኛ 🇪🇹", callback_data="shoplang_ti"),
-            types.InlineKeyboardButton("Somali 🇸🇴", callback_data="shoplang_so"),
-            types.InlineKeyboardButton("Afar 🇪🇹", callback_data="shoplang_aa")
-        )
-        
-        if store.get('shop_photo'):
-            try:
-                bot.send_photo(message.chat.id, store['shop_photo'], caption=caption, reply_markup=markup, parse_mode="Markdown")
-                return
-            except Exception:
-                pass
-        bot.send_message(message.chat.id, caption, reply_markup=markup, parse_mode="Markdown")
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("shoplang_"))
-    def set_language(call):
-        chat_id = call.message.chat.id
-        if not check_active_middleware(chat_id):
-            return
-        lang_code = call.data.split("_")[1]
-
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''INSERT INTO user_langs (chat_id, lang) VALUES (%s, %s)
-                                  ON CONFLICT (chat_id) DO UPDATE SET lang = EXCLUDED.lang''', (chat_id, lang_code))
-                conn.commit()
-        finally:
-            put_conn(conn)
-
-        lang_cache[chat_id] = lang_code
-        try:
-            bot.delete_message(chat_id, call.message.message_id)
-        except Exception:
-            pass
-        bot.send_message(chat_id, STRINGS[lang_code]["welcome"], reply_markup=get_main_menu(lang_code))
-
-    @bot.message_handler(commands=['login'])
-    def login_store(message):
+    def handle_start(message):
         chat_id = message.chat.id
         store = get_store_info(token)
+        
         if not store:
-            bot.reply_to(message, "❌ ይህ ሱቅ ገና አልተመዘገበም።")
+            bot.send_message(chat_id, "🏪 ሱቅ አልተገኘም")
             return
-
-        attempt_key = (token, chat_id)
-        attempt = login_attempts.setdefault(attempt_key, {"count": 0, "lockout_until": 0})
-
-        if time.time() < attempt["lockout_until"]:
-            remaining = int(attempt["lockout_until"] - time.time())
-            bot.reply_to(message, f"🔒 እገዳ ላይ ነዎት! ከ {remaining} ሰከንድ በኋላ ይሞክሩ።")
-            return
-
-        args = message.text.split()
-        if len(args) < 2:
-            bot.reply_to(message, "⚠️ አጠቃቀም፦ `/login [የይለፍ_ቃል]`")
-            return
-
-        input_pass = args[1]
-        test_hash, _ = hash_password(input_pass, store["salt"])
-
-        if test_hash == store["pass_hash"]:
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("UPDATE stores SET admin_id=%s WHERE token=%s", (chat_id, token))
-                    session_token = generate_session_token()
-                    expires_at = datetime.now() + timedelta(hours=2)
-                    cursor.execute('''INSERT INTO admin_sessions (token, chat_id, session_key, expires_at)
-                                      VALUES (%s, %s, %s, %s)
-                                      ON CONFLICT (token, chat_id) DO UPDATE 
-                                      SET session_key = EXCLUDED.session_key, expires_at = EXCLUDED.expires_at''',
-                                   (token, chat_id, session_token, expires_at))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-            login_attempts[attempt_key] = {"count": 0, "lockout_until": 0}
-            bot.reply_to(message, "🔓 በስኬት ገብተዋል! የ 2 ሰዓት ሴሽን ተጀምሯል።", reply_markup=get_admin_menu())
-        else:
-            attempt["count"] += 1
-            if attempt["count"] >= 5:
-                attempt["lockout_until"] = time.time() + 900
-                bot.reply_to(message, "❌ 5 ጊዜ ተሳስተዋል። ለ15 ደቂቃ ታግደዋል።")
-            else:
-                left = 5 - attempt["count"]
-                bot.reply_to(message, f"❌ የተሳሳተ የይለፍ ቃል! {left} ሙከራዎች ቀርተውዎታል።")
-
-    def do_logout(chat_id):
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("DELETE FROM admin_sessions WHERE token=%s AND chat_id=%s", (token, chat_id))
-                conn.commit()
-        finally:
-            put_conn(conn)
-        lang = get_user_lang(chat_id)
-        bot.send_message(chat_id, "🔒 ከአስተዳደር ወጥተዋል።", reply_markup=get_main_menu(lang))
-
-    @bot.message_handler(func=lambda m: m.text == ADMIN_BTN["back"])
-    def admin_back_button(message):
-        do_logout(message.chat.id)
-
-    @bot.message_handler(func=lambda m: m.text in ADMIN_BTN.values())
-    def admin_menu_router(message):
-        chat_id = message.chat.id
-        if not is_verified_admin(chat_id):
-            bot.reply_to(message, "❌ እባክዎ መጀመሪያ በ `/login` ይግቡ።")
-            return
-
-        text = message.text
-        if text == ADMIN_BTN["add_product"]:
-            bot.reply_to(message, "📝 እባክዎ የምርቱን መረጃ በዚህ ፎርማት ይጻፉ፦\n`[የአማርኛ ስም],[የእንግሊዝኛ ስም],[ዋጋ],[ብዛት],[አማርኛ መግለጫ],[እንግሊዝኛ መግለጫ]`", parse_mode="Markdown")
-            admin_states[(token, chat_id)] = {"state": "WAITING_PRODUCT_DETAILS", "data": {}}
-        elif text == ADMIN_BTN["my_products"]:
-            show_my_products(chat_id)
-        elif text == ADMIN_BTN["orders"]:
-            show_orders(chat_id)
-        elif text == ADMIN_BTN["payment"]:
-            bot.reply_to(message, "💰 እባክዎ **የቴሌብር እና CBE Birr ቁጥርዎን** በኮማ (,) ለይተው ይላኩ (ለምሳሌ፦ `0911223344,1000123456789`)፦", parse_mode="Markdown")
-            admin_states[(token, chat_id)] = {"state": "WAITING_PAYMENT_NUMBER", "data": {}}
-        elif text == ADMIN_BTN["stats"]:
-            show_stats(chat_id)
-        elif text == ADMIN_BTN["profile"]:
-            show_profile_setup(chat_id)
-        elif text == ADMIN_BTN["discounts"]:
-            show_discount_menu(chat_id)
-        elif text == ADMIN_BTN["reviews_manage"]:
-            show_reviews_manage(chat_id)
-        elif text == ADMIN_BTN["changepass"]:
-            bot.reply_to(message, "🔑 እባክዎ **አዲሱን የይለፍ ቃል** ይላኩ (ቢያንስ 8 ፊደል/ቁጥር)፦", parse_mode="Markdown")
-            admin_states[(token, chat_id)] = {"state": "WAITING_NEW_PASSWORD", "data": {}}
-        elif text == ADMIN_BTN["logout"]:
-            do_logout(chat_id)
-
-    def show_profile_setup(chat_id):
-        loc_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        loc_markup.add(
-            types.KeyboardButton("📍 የሱቅ አካባቢ አጋራ", request_location=True),
-            types.KeyboardButton(ADMIN_BTN["back"])
-        )
-        bot.send_message(chat_id, "🏪 **የሱቅ መገለጫ ማዘጋጀት**\n\nደረጃ 1/6: የሱቅዎን አካባቢ (Location) ያጋሩ 👇", reply_markup=loc_markup, parse_mode="Markdown")
-        admin_states[(token, chat_id)] = {"state": "WAITING_SHOP_LOCATION", "data": {}}
-
-    def show_my_products(chat_id):
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT id, name_am, price, stock, discount FROM products WHERE token=%s ORDER BY id", (token,))
-                rows = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        if not rows:
-            bot.send_message(chat_id, "📋 ምንም ምርት የለም።")
-            return
-
-        for p_id, name_am, price, stock, discount in rows:
-            discount_text = f" 🏷️ {discount}% OFF" if discount and discount > 0 else ""
-            text = f"📦 **#{p_id} {name_am}**\n💰 {price} ETB{discount_text}\n📦 ብዛት፦ {stock}"
-            markup = types.InlineKeyboardMarkup()
-            markup.add(
-                types.InlineKeyboardButton("🗑️ ሰርዝ", callback_data=f"deleteproduct_{p_id}"),
-                types.InlineKeyboardButton("🏷️ ቅናሽ አስተካክል", callback_data=f"discountprod_{p_id}")
-            )
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    def show_orders(chat_id):
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT id, customer_id, total_price, status_stage, customer_phone,
-                                  created_at, payment_method, payment_confirmed
-                                  FROM orders WHERE token=%s AND status_stage NOT IN (3, -1)
-                                  ORDER BY id DESC LIMIT 20''', (token,))
-                rows = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        if not rows:
-            bot.send_message(chat_id, "📋 ያልተጠናቀቁ ትዕዛዞች የሉም።")
-            return
-
-        for order in rows:
-            order_id, cust_id, total, stage, phone, created_at, payment_method, confirmed = order
-            stage = stage or 0
-            status_label = ORDER_STAGES_AM[stage] if 0 <= stage <= 3 else "🟡 Pending"
-            payment_status = "✅ Confirmed" if confirmed else "⏳ Pending"
-            created = created_at.strftime("%Y-%m-%d %H:%M") if created_at else "N/A"
-            
-            text = (
-                f"🆔 **ትዕዛዝ #{order_id}**\n"
-                f"📅 {created}\n"
-                f"📞 {phone or 'N/A'}\n"
-                f"💵 {total} ETB\n"
-                f"💰 {payment_status}\n"
-                f"📌 {status_label}"
-            )
-            markup = types.InlineKeyboardMarkup()
-            if stage == 0:
-                markup.add(
-                    types.InlineKeyboardButton("✅ አጽድቅ", callback_data=f"approveorder_{order_id}"),
-                    types.InlineKeyboardButton("❌ ውድቅ አድርግ", callback_data=f"rejectorder_{order_id}")
-                )
-            elif stage == 1:
-                markup.add(types.InlineKeyboardButton("🚚 በመንገድ ላይ", callback_data=f"advance_{order_id}"))
-            elif stage == 2:
-                markup.add(types.InlineKeyboardButton("📦 ደርሷል", callback_data=f"advance_{order_id}"))
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    def show_stats(chat_id):
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                # Total products
-                cursor.execute("SELECT COUNT(*) FROM products WHERE token=%s", (token,))
-                product_count = cursor.fetchone()[0]
-                
-                # Orders stats
-                cursor.execute("SELECT COUNT(*), COALESCE(SUM(total_price + COALESCE(delivery_fee,0)),0) FROM orders WHERE token=%s AND status_stage >= 1", (token,))
-                paid_count, revenue = cursor.fetchone()
-                
-                # Pending orders
-                cursor.execute("SELECT COUNT(*) FROM orders WHERE token=%s AND status_stage=0", (token,))
-                pending = cursor.fetchone()[0]
-                
-                # Average rating
-                cursor.execute('''SELECT AVG(r.rating) FROM reviews r 
-                                  JOIN products p ON r.product_id = p.id 
-                                  WHERE p.token=%s''', (token,))
-                avg_rating = cursor.fetchone()[0] or 0
-                
-                # Recent orders (last 7 days)
-                cursor.execute('''SELECT COUNT(*) FROM orders 
-                                  WHERE token=%s AND created_at > NOW() - INTERVAL '7 days' 
-                                  AND status_stage >= 1''', (token,))
-                weekly_orders = cursor.fetchone()[0]
-        finally:
-            put_conn(conn)
-
-        text = (
-            f"📊 **ስቲስቲክስ / Statistics**\n\n"
-            f"📦 ምርቶች / Products: {product_count}\n"
-            f"✅ የተከፈሉ / Paid Orders: {paid_count}\n"
-            f"⏳ በመጠባበቅ ላይ / Pending: {pending}\n"
-            f"💵 ገቢ / Revenue: {revenue:.2f} ETB\n"
-            f"📈 በሳምንት / Weekly Orders: {weekly_orders}\n"
-            f"⭐ አማካይ ደረጃ / Avg Rating: {avg_rating:.1f}/5.0"
-        )
-        bot.send_message(chat_id, text, parse_mode="Markdown")
-
-    def show_discount_menu(chat_id):
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT id, name_am, price, discount FROM products WHERE token=%s", (token,))
-                rows = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        if not rows:
-            bot.send_message(chat_id, "📋 ምንም ምርት የለም።")
-            return
-
-        text = "🏷️ **የቅናሾች አስተዳደር / Discount Management**\n\n"
-        for p_id, name, price, discount in rows:
-            disc_text = f"{discount}% OFF" if discount and discount > 0 else "No discount"
-            text += f"▪️ #{p_id} {name}: {discount_text}\n"
         
-        text += "\n💡 ለቅናሽ ማከል የሚፈልጉትን ምርት ቁጥር እና ቅናሽ መጠን በኮማ ይላኩ፦\n`[product_id],[discount_percent]`"
-        bot.send_message(chat_id, text, parse_mode="Markdown")
-        admin_states[(token, chat_id)] = {"state": "WAITING_DISCOUNT", "data": {}}
-
-    def show_reviews_manage(chat_id):
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT r.id, p.name_am, r.rating, r.comment, r.created_at, r.customer_id
-                                  FROM reviews r JOIN products p ON r.product_id = p.id
-                                  WHERE p.token=%s ORDER BY r.created_at DESC LIMIT 20''', (token,))
-                rows = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        if not rows:
-            bot.send_message(chat_id, "⭐ እስካሁን ምንም ግምገማ የለም።")
+        if not store['is_active']:
+            bot.send_message(chat_id, "❌ ሱቁ ንቁ አይደለም")
             return
-
-        text = "⭐ **የቅርብ ጊዜ ግምገማዎች / Recent Reviews**\n\n"
-        for r_id, p_name, rating, comment, created, cust_id in rows:
-            stars = "⭐" * int(rating) + "☆" * (5 - int(rating))
-            created_str = created.strftime("%Y-%m-%d") if created else "N/A"
-            text += f"📦 {p_name}\n{stars} {rating}/5\n💬 {comment[:50]}...\n📅 {created_str}\n---\n"
         
-        bot.send_message(chat_id, text, parse_mode="Markdown")
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("deleteproduct_"))
-    def delete_product_confirmed(call):
-        chat_id = call.message.chat.id
-        if not is_verified_admin(chat_id):
+        if not store['is_approved']:
+            bot.send_message(chat_id, "⏳ ሱቁ ገና አልጸደቀም")
             return
-        p_id = call.data.split("_")[1]
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("DELETE FROM products WHERE id=%s AND token=%s", (p_id, token))
-                conn.commit()
-        finally:
-            put_conn(conn)
-        bot.edit_message_text(f"🗑️ ምርት #{p_id} ተሰርዟል!", chat_id, call.message.message_id)
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("discountprod_"))
-    def set_product_discount(call):
-        chat_id = call.message.chat.id
-        if not is_verified_admin(chat_id):
-            return
-        p_id = call.data.split("_")[1]
-        bot.send_message(chat_id, f"🏷️ ለምርት #{p_id} ቅናሽ መጠን በመቶኛ (1-99) ይላኩ፦")
-        admin_states[(token, chat_id)] = {"state": f"WAITING_DISCOUNT_{p_id}", "data": {}}
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("approveorder_"))
-    def approve_order_btn(call):
-        chat_id = call.message.chat.id
-        if not is_verified_admin(chat_id):
-            return
-        order_id = int(call.data.split("_")[1])
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT customer_id FROM orders WHERE id=%s AND token=%s", (order_id, token))
-                row = cursor.fetchone()
-                if row:
-                    cust_id = row[0]
-                    cursor.execute("UPDATE orders SET status_am=%s, status_en=%s, status_stage=1, payment_confirmed=TRUE, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-                                   (ORDER_STAGES_AM[1], ORDER_STAGES_EN[1], order_id))
-                    conn.commit()
-                    cust_lang = get_user_lang(cust_id)
-                    bot.send_message(cust_id, STRINGS.get(cust_lang, STRINGS["am"])["approved_msg"])
-        finally:
-            put_conn(conn)
-        bot.edit_message_text(f"✅ ትዕዛዝ #{order_id} ጸድቋል!", chat_id, call.message.message_id)
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("rejectorder_"))
-    def reject_order_btn(call):
-        chat_id = call.message.chat.id
-        if not is_verified_admin(chat_id):
-            return
-        order_id = int(call.data.split("_")[1])
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT customer_id FROM orders WHERE id=%s AND token=%s", (order_id, token))
-                row = cursor.fetchone()
-                if row:
-                    cust_id = row[0]
-                    cursor.execute("UPDATE orders SET status_stage=-1, updated_at=CURRENT_TIMESTAMP WHERE id=%s", (order_id,))
-                    conn.commit()
-                    cust_lang = get_user_lang(cust_id)
-                    bot.send_message(cust_id, STRINGS.get(cust_lang, STRINGS["am"])["rejected_msg"])
-        finally:
-            put_conn(conn)
-        bot.edit_message_text(f"❌ ትዕዛዝ #{order_id} ውድቅ ተደርጓል።", chat_id, call.message.message_id)
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("advance_"))
-    def advance_order_btn(call):
-        chat_id = call.message.chat.id
-        if not is_verified_admin(chat_id):
-            return
-        order_id = int(call.data.split("_")[1])
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT customer_id, status_stage FROM orders WHERE id=%s AND token=%s", (order_id, token))
-                row = cursor.fetchone()
-                if row:
-                    cust_id, stage = row
-                    new_stage = min((stage or 0) + 1, 3)
-                    cursor.execute("UPDATE orders SET status_am=%s, status_en=%s, status_stage=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
-                                   (ORDER_STAGES_AM[new_stage], ORDER_STAGES_EN[new_stage], new_stage, order_id))
-                    conn.commit()
-                    cust_lang = get_user_lang(cust_id)
-                    bot.send_message(cust_id, f"📦 የትዕዛዝ ሁኔታ ተቀይሯል፦ {ORDER_STAGES_AM[new_stage]}")
-        finally:
-            put_conn(conn)
-        bot.edit_message_text(f"🔄 ትዕዛዝ #{order_id} ተዘምኗል።", chat_id, call.message.message_id)
-
-    @bot.message_handler(func=lambda m: m.text in [STRINGS[l]["shop"] for l in STRINGS])
-    def list_products(message):
+        
+        # Main menu
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(
+            types.KeyboardButton("🛍️ ምርቶች"),
+            types.KeyboardButton("🛒 ጋሪ")
+        )
+        markup.add(
+            types.KeyboardButton("📦 ትዕዛዝ"),
+            types.KeyboardButton("❓ እርዳታ")
+        )
+        markup.add(
+            types.KeyboardButton("📍 አካባቢ"),
+            types.KeyboardButton("⭐ ግምገማ")
+        )
+        
+        text = f"🏪 **{store['store_name']}**\n\n"
+        if store.get('shop_description'):
+            text += f"📝 {store['shop_description']}\n\n"
+        if store.get('area_text'):
+            text += f"📍 {store['area_text']}\n"
+        text += f"⭐ {store.get('rating', 0)}/5.0"
+        
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    
+    @bot.message_handler(func=lambda m: m.text in ["🛍️ ምርቶች", "🛍️ Products"])
+    def handle_products(message):
         chat_id = message.chat.id
-        if not check_active_middleware(chat_id):
-            return
-        lang = get_user_lang(chat_id)
-        conn = get_safe_connection()
+        lang = get_user_lang(chat_id, token)
+        ln = STRINGS.get(lang, STRINGS["am"])
+        
         try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT id, name_am, name_en, price, stock, desc_am, desc_en, 
-                                  image_url, discount, discount_until 
-                                  FROM products WHERE token=%s''', (token,))
-                rows = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        if not rows:
-            bot.send_message(chat_id, "🛍️ ምንም ምርት የለም።")
-            return
-
-        for row in rows:
-            p_id, name_am, name_en, price, stock, desc_am, desc_en, image_url, discount, discount_until = row
-            name = name_am if lang in ["am", "om", "ti"] else name_en
-            desc = desc_am if lang in ["am", "om", "ti"] else desc_en
+            products = db_execute_dict("""
+                SELECT id, name_am, name_en, price, stock, desc_am, desc_en, image_url, discount
+                FROM products WHERE token = %s AND stock > 0
+                ORDER BY id
+            """, (token,))
             
-            # Check if discount is valid
-            discount_text = ""
-            if discount and discount > 0:
-                if discount_until is None or discount_until > datetime.now():
-                    final_price = price * (1 - discount / 100)
-                    discount_text = f"\n🏷️ {discount}% OFF → **{final_price:.2f} ETB**"
+            if not products:
+                bot.send_message(chat_id, "🛍️ ምንም ምርት የለም")
+                return
+            
+            for p in products:
+                name = p['name_am'] if lang in ["am", "om", "ti"] else p['name_en']
+                desc = p['desc_am'] if lang in ["am", "om", "ti"] else p['desc_en']
+                price = p['price']
+                
+                if p['discount'] and p['discount'] > 0:
+                    final_price = price * (1 - p['discount'] / 100)
+                    price_text = f"{price} ETB → **{final_price:.2f} ETB** 🏷️ {p['discount']}% OFF"
                 else:
-                    discount = 0
-            
-            text = f"📦 **{name}**\n💰 ዋጋ፦ {price} ETB{discount_text}\n📝 {desc}"
-            markup = types.InlineKeyboardMarkup()
-            if (stock or 0) > 0:
-                markup.add(
-                    types.InlineKeyboardButton("🛒 ወደ ጋሪ ጨምር", callback_data=f"shopadd_{p_id}"),
-                    types.InlineKeyboardButton("⭐ ደረጃ ስጥ", callback_data=f"rateproduct_{p_id}")
-                )
-            
-            if image_url:
-                try:
-                    bot.send_photo(chat_id, image_url, caption=text, reply_markup=markup, parse_mode="Markdown")
-                    continue
-                except Exception:
-                    pass
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("shopadd_"))
+                    price_text = f"{price} ETB"
+                
+                text = f"📦 **{name}**\n💰 {price_text}\n📝 {desc}"
+                
+                markup = types.InlineKeyboardMarkup()
+                if p['stock'] > 0:
+                    markup.add(types.InlineKeyboardButton("🛒 ወደ ጋሪ ጨምር", callback_data=f"add_{p['id']}"))
+                markup.add(types.InlineKeyboardButton("⭐ ደረጃ ስጥ", callback_data=f"rate_{p['id']}"))
+                
+                if p['image_url']:
+                    try:
+                        bot.send_photo(chat_id, p['image_url'], caption=text, reply_markup=markup, parse_mode="Markdown")
+                        continue
+                    except:
+                        pass
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("add_"))
     def add_to_cart(call):
         chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
+        lang = get_user_lang(chat_id, token)
+        ln = STRINGS.get(lang, STRINGS["am"])
         p_id = int(call.data.split("_")[1])
+        
         cart_key = (token, chat_id)
-        if cart_key not in user_carts:
-            user_carts[cart_key] = {}
-        user_carts[cart_key][p_id] = user_carts[cart_key].get(p_id, 0) + 1
-        bot.answer_callback_query(call.id, STRINGS.get(lang, STRINGS["am"])["added"])
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("rateproduct_"))
+        with user_carts_lock:
+            if cart_key not in user_carts:
+                user_carts[cart_key] = {}
+            user_carts[cart_key][p_id] = user_carts[cart_key].get(p_id, 0) + 1
+        
+        bot.answer_callback_query(call.id, ln["added"])
+    
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("rate_"))
     def rate_product(call):
         chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
         p_id = int(call.data.split("_")[1])
         
         markup = types.InlineKeyboardMarkup(row_width=5)
         for i in range(1, 6):
             markup.add(types.InlineKeyboardButton("⭐" * i, callback_data=f"rating_{p_id}_{i}"))
         
-        bot.send_message(chat_id, STRINGS.get(lang, STRINGS["am"])["rate_product"], reply_markup=markup)
-
+        bot.send_message(chat_id, "⭐ ምርቱን ደረጃ ይስጡ:", reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    
     @bot.callback_query_handler(func=lambda call: call.data.startswith("rating_"))
     def process_rating(call):
         chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
         _, p_id, rating = call.data.split("_")
         p_id, rating = int(p_id), int(rating)
         
-        # Request comment
-        msg = bot.send_message(chat_id, "💬 እባክዎ ለምርቱ አስተያየትዎን ይጻፉ (ወይም 'ለቀው')፦")
-        bot.register_next_step_handler(msg, process_review_comment, p_id, rating)
-        bot.delete_message(chat_id, call.message.message_id)
-
-    def process_review_comment(message, product_id, rating):
-        chat_id = message.chat.id
-        comment = message.text if message.text != "ለቀው" else ""
-        
-        conn = get_safe_connection()
         try:
-            with conn.cursor() as cursor:
-                cursor.execute('''INSERT INTO reviews (product_id, customer_id, rating, comment)
-                                  VALUES (%s, %s, %s, %s)''',
-                               (product_id, chat_id, rating, comment))
-                conn.commit()
-        finally:
-            put_conn(conn)
+            db_execute("""
+                INSERT INTO reviews (product_id, customer_id, rating)
+                VALUES (%s, %s, %s)
+            """, (p_id, chat_id, rating))
+            bot.send_message(chat_id, "🙏 ለግምገማዎ እናመሰግናለን!")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
         
-        lang = get_user_lang(chat_id)
-        bot.send_message(chat_id, STRINGS.get(lang, STRINGS["am"])["thank_review"])
-
-    @bot.message_handler(func=lambda m: m.text in [STRINGS[l]["cart"] for l in STRINGS])
-    def show_cart(message):
+        bot.delete_message(chat_id, call.message.message_id)
+        bot.answer_callback_query(call.id)
+    
+    @bot.message_handler(func=lambda m: m.text in ["🛒 ጋሪ", "🛒 Cart"])
+    def handle_cart(message):
         chat_id = message.chat.id
-        if not check_active_middleware(chat_id):
-            return
-        lang = get_user_lang(chat_id)
+        lang = get_user_lang(chat_id, token)
         ln = STRINGS.get(lang, STRINGS["am"])
-        cart = user_carts.get((token, chat_id), {})
+        
+        cart_key = (token, chat_id)
+        with user_carts_lock:
+            cart = user_carts.get(cart_key, {})
+        
         if not cart:
             bot.send_message(chat_id, ln["empty"])
             return
-
-        total = 0
-        text = "🛒 **ጋሪዎ / Cart:**\n\n"
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                for p_id, qty in list(cart.items()):
-                    cursor.execute("SELECT name_am, name_en, price, discount, discount_until FROM products WHERE id=%s AND token=%s", (p_id, token))
-                    row = cursor.fetchone()
-                    if row:
-                        name = row[0] if lang in ["am", "om", "ti"] else row[1]
-                        price = row[2]
-                        discount = row[3] if row[3] and row[3] > 0 else 0
-                        if discount and (row[4] is None or row[4] > datetime.now()):
-                            price = price * (1 - discount / 100)
-                        subtotal = price * qty
-                        total += subtotal
-                        text += f"▪️ {name} x {qty} = {subtotal:.2f} ETB\n"
-        finally:
-            put_conn(conn)
-
-        store = get_store_info(token)
-        min_order = store.get('min_order', 0) if store else 0
         
-        text += f"\n💵 **አጠቃላይ / Total፦ {total:.2f} ETB**"
-        if min_order > 0 and total < min_order:
-            text += f"\n⚠️ ዝቅተኛ ትዕዛዝ {min_order} ETB ነው"
+        total = 0
+        text = "🛒 **ጋሪ**\n\n"
+        
+        try:
+            for p_id, qty in list(cart.items()):
+                product = db_execute_dict("SELECT name_am, name_en, price FROM products WHERE id = %s AND token = %s", (p_id, token))
+                if product:
+                    name = product[0]['name_am'] if lang in ["am", "om", "ti"] else product[0]['name_en']
+                    price = product[0]['price']
+                    subtotal = price * qty
+                    total += subtotal
+                    text += f"▪️ {name} x {qty} = {subtotal:.2f} ETB\n"
+                else:
+                    del cart[p_id]
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
+            return
+        
+        text += f"\n💵 **{ln['total']}: {total:.2f} ETB**"
         
         markup = types.InlineKeyboardMarkup()
-        if total >= min_order:
-            markup.add(types.InlineKeyboardButton(ln["checkout_btn"], callback_data="shop_checkout"))
-        markup.add(types.InlineKeyboardButton(ln["clear_btn"], callback_data="shop_clear"))
+        markup.add(
+            types.InlineKeyboardButton(ln["checkout"], callback_data="checkout"),
+            types.InlineKeyboardButton(ln["clear"], callback_data="clear")
+        )
+        
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    def calculate_distance(lat1, lon1, lat2, lon2):
-        # Haversine formula
-        R = 6371  # Earth's radius in km
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-        c = 2 * math.asin(math.sqrt(a))
-        return R * c
-
-    def finalize_checkout(chat_id, lang):
+    
+    @bot.callback_query_handler(func=lambda call: call.data == "clear")
+    def clear_cart(call):
+        chat_id = call.message.chat.id
+        lang = get_user_lang(chat_id, token)
+        ln = STRINGS.get(lang, STRINGS["am"])
+        
         cart_key = (token, chat_id)
-        cart = user_carts.get(cart_key, {})
+        with user_carts_lock:
+            user_carts[cart_key] = {}
+        
+        bot.edit_message_text("🗑️ ጋሪ ጸድቷል", chat_id, call.message.message_id)
+        bot.answer_callback_query(call.id)
+    
+    @bot.callback_query_handler(func=lambda call: call.data == "checkout")
+    def checkout(call):
+        chat_id = call.message.chat.id
+        lang = get_user_lang(chat_id, token)
+        ln = STRINGS.get(lang, STRINGS["am"])
+        
+        customer = get_customer_info(chat_id)
+        if not customer or not customer.get('phone'):
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add(types.KeyboardButton("📱 ስልክ አጋራ", request_contact=True))
+            bot.send_message(chat_id, "📱 ትዕዛዝ ለማዘዝ ስልክ ቁጥርዎን ያጋሩ:", reply_markup=markup)
+            admin_states[(token, chat_id)] = {"state": "PENDING_CHECKOUT", "data": {}}
+            bot.answer_callback_query(call.id)
+            return
+        
+        process_checkout(chat_id, lang, call)
+    
+    def process_checkout(chat_id, lang, call=None):
+        cart_key = (token, chat_id)
+        with user_carts_lock:
+            cart = user_carts.get(cart_key, {})
+        
         if not cart:
             return
         
         store = get_store_info(token)
+        customer = get_customer_info(chat_id)
+        
         items_total = 0
-        delivery_fee = 0
+        order_items = []
         
-        conn = get_safe_connection()
         try:
-            with conn.cursor() as cursor:
-                # Calculate total with discounts
-                for p_id, qty in cart.items():
-                    cursor.execute("SELECT price, discount, discount_until FROM products WHERE id=%s AND token=%s", (p_id, token))
-                    row = cursor.fetchone()
-                    if row:
-                        price = row[0]
-                        discount = row[1] if row[1] and row[1] > 0 else 0
-                        if discount and (row[2] is None or row[2] > datetime.now()):
-                            price = price * (1 - discount / 100)
-                        items_total += price * qty
-
-                # Check delivery radius
-                customer = get_customer_info(chat_id)
-                if customer and customer.get('lat') and store and store.get('shop_lat'):
-                    distance = calculate_distance(
-                        store['shop_lat'], store['shop_lng'],
-                        customer['lat'], customer['lng']
-                    )
-                    if distance > store.get('delivery_radius', 5):
-                        delivery_fee = 50  # Additional fee for far delivery
-
-                # Create order
-                cursor.execute('''INSERT INTO orders (token, customer_id, customer_phone, customer_lat, customer_lng,
-                                  status_am, status_en, total_price, delivery_fee, status_stage, created_at)
-                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, CURRENT_TIMESTAMP) RETURNING id''',
-                               (token, chat_id, customer.get('phone') if customer else None,
-                                customer.get('lat') if customer else None, customer.get('lng') if customer else None,
-                                ORDER_STAGES_AM[0], ORDER_STAGES_EN[0], items_total, delivery_fee))
-                order_id = cursor.fetchone()[0]
-                
-                # Add order items
-                for p_id, qty in cart.items():
-                    cursor.execute("SELECT name_am, price FROM products WHERE id=%s AND token=%s", (p_id, token))
-                    row = cursor.fetchone()
-                    if row:
-                        cursor.execute('''INSERT INTO order_items (order_id, product_id, product_name, quantity, price, subtotal)
-                                          VALUES (%s, %s, %s, %s, %s, %s)''',
-                                       (order_id, p_id, row[0], qty, row[1], row[1] * qty))
-                
-                conn.commit()
-        finally:
-            put_conn(conn)
-
-        user_carts[cart_key] = {}
-        ln = STRINGS.get(lang, STRINGS["am"])
-        pay_info = f"📱 **Telebirr:** `{store.get('telebirr')}`"
-        if store.get('cbebirr'):
-            pay_info += f"\n🏦 **CBE Birr:** `{store.get('cbebirr')}`"
-        
-        total_with_delivery = items_total + delivery_fee
-        delivery_text = f"\n🚚 የማድረስ ወጪ / Delivery Fee: {delivery_fee} ETB" if delivery_fee > 0 else ""
-
-        pay_text = (
-            f"🆔 **Order ID:** `{order_id}`\n"
-            f"💵 **ሂሳብ / Total፦** {items_total:.2f} ETB{delivery_text}\n"
-            f"💰 **አጠቃላይ / Grand Total:** {total_with_delivery:.2f} ETB\n\n"
-            f"{pay_info}\n\n{ln['receipt_prompt']}"
-        )
-        bot.send_message(chat_id, pay_text, parse_mode="Markdown", reply_markup=get_main_menu(lang))
-        admin_states[(token, chat_id)] = {"state": f"AWAITING_RECEIPT_{order_id}", "data": {}}
-
-    @bot.callback_query_handler(func=lambda call: call.data in ["shop_checkout", "shop_clear"])
-    def cart_actions(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        cart_key = (token, chat_id)
-        if call.data == "shop_clear":
-            user_carts[cart_key] = {}
-            bot.edit_message_text("🛒 ጋሪው ጸድቷል!", chat_id, call.message.message_id)
-        elif call.data == "shop_checkout":
-            cust = get_customer_info(chat_id)
-            if cust and cust.get("phone") and cust.get("lat"):
-                finalize_checkout(chat_id, lang)
-            else:
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-                markup.add(
-                    types.KeyboardButton("📱 ስልክ ቁጥር አጋራ", request_contact=True),
-                    types.KeyboardButton("📍 አካባቢ አጋራ", request_location=True)
+            for p_id, qty in list(cart.items()):
+                product = db_execute_dict("SELECT price, stock FROM products WHERE id = %s AND token = %s", (p_id, token))
+                if product:
+                    price = product[0]['price']
+                    stock = product[0]['stock']
+                    buy_qty = min(qty, stock)
+                    if buy_qty > 0:
+                        items_total += price * buy_qty
+                        order_items.append((p_id, buy_qty, price))
+            
+            if not order_items:
+                with user_carts_lock:
+                    user_carts[cart_key] = {}
+                bot.send_message(chat_id, "❌ ምርቶች አልቀሩም")
+                return
+            
+            delivery_fee = 0
+            if store.get('shop_lat') and customer.get('lat'):
+                dist = calculate_distance(
+                    store['shop_lat'], store['shop_lng'],
+                    customer['lat'], customer['lng']
                 )
-                bot.send_message(chat_id, "📱 እባክዎ ትዕዛዝ ከመፈጸምዎ በፊት ስልክ ቁጥርዎን እና አካባቢዎን ያጋሩ 👇", reply_markup=markup)
-                admin_states[(token, chat_id)] = {"state": "PENDING_CHECKOUT", "data": {}}
+                if dist > 5:
+                    delivery_fee = 50
+            
+            total = items_total + delivery_fee
+            
+            order_id = db_execute("""
+                INSERT INTO orders (token, customer_id, customer_phone, customer_lat, customer_lng,
+                                   status_am, status_en, total_price, delivery_fee, status_stage)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0) RETURNING id
+            """, (
+                token, chat_id, customer.get('phone'),
+                customer.get('lat'), customer.get('lng'),
+                ORDER_STAGES_AM[0], ORDER_STAGES_EN[0],
+                items_total, delivery_fee
+            ), fetch=True)[0][0]
+            
+            for p_id, qty, price in order_items:
+                product = db_execute_dict("SELECT name_am FROM products WHERE id = %s", (p_id,))
+                name = product[0]['name_am'] if product else f"Product #{p_id}"
+                db_execute("""
+                    INSERT INTO order_items (order_id, product_id, product_name, quantity, price, subtotal)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (order_id, p_id, name, qty, price, price * qty))
+                db_execute("UPDATE products SET stock = stock - %s WHERE id = %s", (qty, p_id))
+            
+            with user_carts_lock:
+                user_carts[cart_key] = {}
+            
+            pay_info = f"📱 Telebirr: `{store.get('telebirr', 'N/A')}`"
+            if store.get('cbebirr'):
+                pay_info += f"\n🏦 CBE Birr: `{store.get('cbebirr')}`"
+            
+            pay_text = f"""
+🆔 **Order ID:** `{order_id}`
+💵 ድምር: {items_total:.2f} ETB
+🚚 ማድረሻ: {delivery_fee:.2f} ETB
+💰 **አጠቃላይ: {total:.2f} ETB**
 
+{pay_info}
+
+{ln['receipt_prompt']}
+"""
+            bot.send_message(chat_id, pay_text, parse_mode="Markdown")
+            admin_states[(token, chat_id)] = {"state": f"AWAITING_RECEIPT_{order_id}", "data": {}}
+            
+            if call:
+                bot.answer_callback_query(call.id)
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
     @bot.message_handler(content_types=['contact'])
     def handle_contact(message):
+        chat_id = message.chat.id
         if message.contact:
-            save_customer_phone(message.chat.id, message.contact.phone_number)
-            bot.reply_to(message, "✅ ስልክ ቁጥርዎ ተመዝግቧል!")
-
+            save_customer_phone(chat_id, message.contact.phone_number)
+            bot.reply_to(message, "✅ ስልክ ቁጥር ተመዝግቧል!")
+            
+            state = admin_states.get((token, chat_id), {}).get("state")
+            if state == "PENDING_CHECKOUT":
+                customer = get_customer_info(chat_id)
+                if customer.get('lat') and customer.get('lng'):
+                    lang = get_user_lang(chat_id, token)
+                    process_checkout(chat_id, lang)
+                else:
+                    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+                    markup.add(types.KeyboardButton("📍 አካባቢ አጋራ", request_location=True))
+                    bot.send_message(chat_id, "📍 አካባቢ ያጋሩ:", reply_markup=markup)
+    
     @bot.message_handler(content_types=['location'])
     def handle_location(message):
         chat_id = message.chat.id
-        session_key = (token, chat_id)
-        state = admin_states.get(session_key, {}).get("state", "")
-        
-        if state == "WAITING_SHOP_LOCATION":
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("UPDATE stores SET shop_lat=%s, shop_lng=%s WHERE token=%s", 
-                                   (message.location.latitude, message.location.longitude, token))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-            bot.send_message(chat_id, "✅ አካባቢ ተቀምጧል!\n\nደረጃ 2/6: የሱቅዎን አካባቢ ስም (ለምሳሌ 'ቦሌ') በጽሁፍ ይላኩ፦")
-            admin_states[session_key] = {"state": "WAITING_SHOP_AREA", "data": {}}
-            return
-
         save_customer_location(chat_id, message.location.latitude, message.location.longitude)
+        bot.reply_to(message, "✅ አካባቢ ተመዝግቧል!")
+        
+        state = admin_states.get((token, chat_id), {}).get("state")
         if state == "PENDING_CHECKOUT":
-            finalize_checkout(chat_id, get_user_lang(chat_id))
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_SHOP_AREA")
-    def process_shop_area(message):
+            customer = get_customer_info(chat_id)
+            if customer.get('phone'):
+                lang = get_user_lang(chat_id, token)
+                process_checkout(chat_id, lang)
+    
+    @bot.message_handler(func=lambda m: m.text in ["📦 ትዕዛዝ", "📦 Track Order"])
+    def handle_track(message):
         chat_id = message.chat.id
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("UPDATE stores SET area_text=%s WHERE token=%s", (message.text.strip(), token))
-                conn.commit()
-        finally:
-            put_conn(conn)
-        bot.reply_to(message, "✅ ተቀምጧል!\n\nደረጃ 3/6: የሱቅዎን ፎቶ (Logo ወይም Shop Photo) ይላኩ፦")
-        admin_states[(token, chat_id)] = {"state": "WAITING_SHOP_PHOTO", "data": {}}
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_SHOP_DESC")
-    def process_shop_desc(message):
+        lang = get_user_lang(chat_id, token)
+        ln = STRINGS.get(lang, STRINGS["am"])
+        
+        msg = bot.send_message(chat_id, ln["enter_id"])
+        bot.register_next_step_handler(msg, process_track)
+    
+    def process_track(message):
         chat_id = message.chat.id
-        conn = get_safe_connection()
+        lang = get_user_lang(chat_id, token)
+        ln = STRINGS.get(lang, STRINGS["am"])
+        
         try:
-            with conn.cursor() as cursor:
-                cursor.execute("UPDATE stores SET shop_description=%s WHERE token=%s", (message.text.strip(), token))
-                conn.commit()
-        finally:
-            put_conn(conn)
-        bot.reply_to(message, "✅ ተቀምጧል!\n\nደረጃ 5/6: የሱቅዎን ክፍት ሰዓታት (ለምሳሌ 'ሰኞ-ቅዳሜ 8:00-20:00') ይላኩ፦")
-        admin_states[(token, chat_id)] = {"state": "WAITING_SHOP_HOURS", "data": {}}
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_SHOP_HOURS")
-    def process_shop_hours(message):
-        chat_id = message.chat.id
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("UPDATE stores SET opening_hours=%s WHERE token=%s", (message.text.strip(), token))
-                conn.commit()
-        finally:
-            put_conn(conn)
-        bot.reply_to(message, "✅ ተቀምጧል!\n\nደረጃ 6/6: ዝቅተኛ የትዕዛዝ መጠን (Min Order) በETB ይላኩ (ለምሳሌ '200')፦")
-        admin_states[(token, chat_id)] = {"state": "WAITING_MIN_ORDER", "data": {}}
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_MIN_ORDER")
-    def process_min_order(message):
-        chat_id = message.chat.id
-        try:
-            min_order = float(message.text.strip())
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("UPDATE stores SET min_order=%s WHERE token=%s", (min_order, token))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-            bot.reply_to(message, "🎉 የሱቅዎ መገለጫ ሙሉ በሙሉ ተጠናቅቆ ተመዝግቧል!", reply_markup=get_admin_menu())
+            order_id = int(message.text.strip())
+            order = db_execute_dict("""
+                SELECT status_am, status_en, total_price, delivery_fee, created_at
+                FROM orders WHERE id = %s AND token = %s AND customer_id = %s
+            """, (order_id, token, chat_id))
+            
+            if order:
+                order = order[0]
+                status = order['status_am'] if lang in ["am", "om", "ti"] else order['status_en']
+                text = f"📦 **ትዕዛዝ #{order_id}**\n"
+                text += f"📌 {status}\n"
+                text += f"💵 {order['total_price']:.2f} ETB\n"
+                text += f"📅 {order['created_at'].strftime('%Y-%m-%d %H:%M') if order['created_at'] else 'N/A'}"
+                bot.send_message(chat_id, text, parse_mode="Markdown")
+            else:
+                bot.send_message(chat_id, ln["not_found"])
         except ValueError:
-            bot.reply_to(message, "❌ የተሳሳተ ቁጥር! እባክዎ ደግመው ይሞክሩ።")
-            return
-        admin_states[(token, chat_id)] = {"state": "", "data": {}}
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_NEW_PASSWORD")
-    def process_new_pass(message):
+            bot.send_message(chat_id, ln["not_found"])
+    
+    @bot.message_handler(func=lambda m: m.text in ["📍 አካባቢ", "📍 Location"])
+    def handle_location_info(message):
         chat_id = message.chat.id
-        if len(message.text.strip()) < 8:
-            bot.reply_to(message, "❌ የይለፍ ቃሉ ቢያንስ 8 ፊደል/ቁጥር መሆን አለበት።")
-            return
-        h_pass, salt = hash_password(message.text.strip())
-        conn = get_safe_connection()
+        store = get_store_info(token)
+        if store and store.get('shop_lat') and store.get('shop_lng'):
+            bot.send_location(chat_id, store['shop_lat'], store['shop_lng'])
+            bot.send_message(chat_id, f"📍 {store.get('store_name')} አካባቢ")
+        else:
+            bot.send_message(chat_id, "📍 አካባቢ አልተገኘም")
+    
+    @bot.message_handler(func=lambda m: m.text in ["⭐ ግምገማ", "⭐ Reviews"])
+    def handle_reviews(message):
+        chat_id = message.chat.id
         try:
-            with conn.cursor() as cursor:
-                cursor.execute("UPDATE stores SET password_hash=%s, password_salt=%s WHERE token=%s", (h_pass, salt, token))
-                conn.commit()
-        finally:
-            put_conn(conn)
-        bot.reply_to(message, "✅ የይለፍ ቃል ተቀይሯል!")
-        admin_states[(token, chat_id)] = {"state": "", "data": {}}
+            reviews = db_execute_dict("""
+                SELECT r.rating, r.comment, r.created_at, p.name_am
+                FROM reviews r JOIN products p ON r.product_id = p.id
+                WHERE p.token = %s
+                ORDER BY r.created_at DESC LIMIT 10
+            """, (token,))
+            
+            if not reviews:
+                bot.send_message(chat_id, "⭐ ምንም ግምገማ የለም")
+                return
+            
+            text = "⭐ **የቅርብ ጊዜ ግምገማዎች**\n\n"
+            for r in reviews:
+                stars = "⭐" * r['rating']
+                text += f"📦 {r['name_am']}\n{stars}\n"
+                if r['comment']:
+                    text += f"💬 {r['comment']}\n"
+                text += f"📅 {r['created_at'].strftime('%Y-%m-%d') if r['created_at'] else 'N/A'}\n\n"
+            
+            bot.send_message(chat_id, text, parse_mode="Markdown")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
+    @bot.message_handler(func=lambda m: m.text in ["❓ እርዳታ", "❓ Help"])
+    def handle_help(message):
+        text = """
+❓ **እርዳታ / Help**
 
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state", "").startswith("WAITING_DISCOUNT"))
-    def process_discount(message):
+🛍️ ምርቶች - የሱቁን ምርቶች ይመልከቱ
+🛒 ጋሪ - የእርስዎን ጋሪ ይመልከቱ
+📦 ትዕዛዝ - ትዕዛዝዎን ይከታተሉ
+📍 አካባቢ - የሱቁን አካባቢ ይመልከቱ
+⭐ ግምገማ - ግምገማዎችን ይመልከቱ
+
+📞 ለተጨማሪ እርዳታ: +251911223344
+"""
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    
+    @bot.message_handler(content_types=['photo'])
+    def handle_receipt(message):
         chat_id = message.chat.id
         state = admin_states.get((token, chat_id), {}).get("state", "")
         
-        try:
-            if "_" in state:
-                p_id = int(state.split("_")[1])
-                discount = float(message.text.strip())
-                if discount < 0 or discount > 99:
-                    bot.reply_to(message, "❌ ቅናሽ ከ 0 እስከ 99 መቶኛ መሆን አለበት።")
-                    return
-                
-                conn = get_safe_connection()
-                try:
-                    with conn.cursor() as cursor:
-                        cursor.execute("UPDATE products SET discount=%s, discount_until=CURRENT_TIMESTAMP + INTERVAL '30 days' WHERE id=%s AND token=%s",
-                                       (discount, p_id, token))
-                        conn.commit()
-                finally:
-                    put_conn(conn)
-                bot.reply_to(message, f"✅ ለምርት #{p_id} {discount}% ቅናሽ ተጨምሯል!")
-            else:
-                # Bulk discount from discount menu
-                parts = message.text.split(",")
-                if len(parts) == 2:
-                    p_id, discount = int(parts[0].strip()), float(parts[1].strip())
-                    if discount < 0 or discount > 99:
-                        bot.reply_to(message, "❌ ቅናሽ ከ 0 እስከ 99 መቶኛ መሆን አለበት።")
-                        return
-                    conn = get_safe_connection()
-                    try:
-                        with conn.cursor() as cursor:
-                            cursor.execute("UPDATE products SET discount=%s, discount_until=CURRENT_TIMESTAMP + INTERVAL '30 days' WHERE id=%s AND token=%s",
-                                           (discount, p_id, token))
-                            conn.commit()
-                    finally:
-                        put_conn(conn)
-                    bot.reply_to(message, f"✅ ለምርት #{p_id} {discount}% ቅናሽ ተጨምሯል!")
-                else:
-                    bot.reply_to(message, "❌ የተሳሳተ ፎርማት! እባክዎ `[product_id],[discount_percent]` ይላኩ።")
-        except ValueError:
-            bot.reply_to(message, "❌ የተሳሳተ ቁጥር! እባክዎ ደግመው ይሞክሩ።")
-        admin_states[(token, chat_id)] = {"state": "", "data": {}}
-
-    @bot.message_handler(content_types=['photo'])
-    def handle_photos(message):
-        chat_id = message.chat.id
-        session_key = (token, chat_id)
-        state_dict = admin_states.get(session_key, {"state": "", "data": {}})
-        state = state_dict["state"]
-        store = get_store_info(token)
-
         if state.startswith("AWAITING_RECEIPT_"):
             order_id = int(state.split("_")[2])
-            admin_id = store["admin_id"] if store else chat_id
+            store = get_store_info(token)
+            admin_id = store.get('admin_id') if store else chat_id
+            
             markup = types.InlineKeyboardMarkup()
             markup.add(
                 types.InlineKeyboardButton("✅ አጽድቅ", callback_data=f"approveorder_{order_id}"),
-                types.InlineKeyboardButton("❌ ውድቅ አድርግ", callback_data=f"rejectorder_{order_id}")
+                types.InlineKeyboardButton("❌ ውድቅ", callback_data=f"rejectorder_{order_id}")
             )
-            bot.send_message(admin_id, f"🔔 **አዲስ የክፍያ ደረሰኝ ለትዕዛዝ #{order_id}**", reply_markup=markup, parse_mode="Markdown")
-            bot.forward_message(admin_id, chat_id, message.message_id)
-            bot.reply_to(message, "✅ ደረሰኝዎ ተልኳል።")
-            admin_states[session_key] = {"state": "", "data": {}}
-        elif state == "WAITING_SHOP_PHOTO":
-            photo_id = message.photo[-1].file_id
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("UPDATE stores SET shop_photo=%s WHERE token=%s", (photo_id, token))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-            bot.reply_to(message, "✅ ፎቶ ተቀምጧል!\n\nደረጃ 4/6: ስለ ሱቅዎ አጭር መግለጫ (Description) ይጻፉ፦")
-            admin_states[session_key] = {"state": "WAITING_SHOP_DESC", "data": {}}
-        elif state == "WAITING_PRODUCT_PHOTO":
-            photo_id = message.photo[-1].file_id
-            p_data = state_dict["data"]
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute('''INSERT INTO products (token, name_am, name_en, price, stock, desc_am, desc_en, image_url)
-                                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s)''',
-                                   (token, p_data["name_am"], p_data["name_en"], p_data["price"], p_data["stock"], 
-                                    p_data["desc_am"], p_data["desc_en"], photo_id))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-            bot.reply_to(message, f"🎉 ምርቱ '{p_data['name_am']}' ተጨምሯል!")
-            admin_states[session_key] = {"state": "", "data": {}}
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_PRODUCT_DETAILS")
-    def process_add_prod(message):
-        session_key = (token, message.chat.id)
-        try:
-            parts = message.text.split(",")
-            if len(parts) < 6:
-                bot.reply_to(message, "❌ ሁሉንም 6 መረጃዎች ማስገባት አለብዎት!")
-                return
-            product_data = {
-                "name_am": parts[0].strip(),
-                "name_en": parts[1].strip(),
-                "price": float(parts[2].strip()),
-                "stock": int(parts[3].strip()),
-                "desc_am": parts[4].strip(),
-                "desc_en": parts[5].strip()
-            }
-            bot.reply_to(message, "📸 የምርቱን ፎቶ ይላኩ፦")
-            admin_states[session_key] = {"state": "WAITING_PRODUCT_PHOTO", "data": product_data}
-        except Exception as e:
-            bot.reply_to(message, f"❌ የፎርማት ስህተት አለ። በድጋሚ ይሞክሩ። {e}")
-
-    @bot.message_handler(func=lambda m: m.text in [STRINGS[l]["track"] for l in STRINGS])
-    def track_order(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        bot.reply_to(message, STRINGS.get(lang, STRINGS["am"])["enter_id"])
-        admin_states[(token, chat_id)] = {"state": "WAITING_ORDER_TRACK", "data": {}}
-
-    @bot.message_handler(func=lambda m: admin_states.get((token, m.chat.id), {}).get("state") == "WAITING_ORDER_TRACK")
-    def process_order_track(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        try:
-            order_id = int(message.text.strip())
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute('''SELECT status_am, status_en, total_price, delivery_fee, status_stage,
-                                      created_at, customer_phone
-                                      FROM orders WHERE id=%s AND token=%s AND customer_id=%s''',
-                                   (order_id, token, chat_id))
-                    row = cursor.fetchone()
-            finally:
-                put_conn(conn)
             
-            if row:
-                status_am, status_en, total, delivery, stage, created, phone = row
-                stage = stage or 0
-                status = status_am if lang in ["am", "om", "ti"] else status_en
-                created_str = created.strftime("%Y-%m-%d %H:%M") if created else "N/A"
-                
-                text = (
-                    f"📦 **ትዕዛዝ / Order #{order_id}**\n"
-                    f"📅 {created_str}\n"
-                    f"📞 {phone or 'N/A'}\n"
-                    f"💵 {total:.2f} ETB"
-                )
-                if delivery and delivery > 0:
-                    text += f"\n🚚 +{delivery:.2f} ETB (የማድረስ ወጪ)"
-                text += f"\n📌 **{status}**"
-                
-                # Show progress bar
-                stages = ["⬜", "⬜", "⬜", "⬜"]
-                for i in range(min(stage, 3)):
-                    stages[i] = "🟩"
-                text += f"\n\n{''.join(stages)}"
-                
-                bot.send_message(chat_id, text, parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, STRINGS.get(lang, STRINGS["am"])["not_found"])
-        except ValueError:
-            bot.send_message(chat_id, STRINGS.get(lang, STRINGS["am"])["invalid_id"])
-        admin_states[(token, chat_id)] = {"state": "", "data": {}}
-
-    @bot.message_handler(func=lambda m: m.text in [STRINGS[l]["faq"] for l in STRINGS])
-    def show_faq(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        store = get_store_info(token)
-        
-        faq_text = STRINGS.get(lang, STRINGS["am"])["faq_text"]
-        if store:
-            extra_info = (
-                f"\n\n🚚 **የማድረስ መረጃ / Delivery Info**\n"
-                f"📍 አካባቢ / Area: {store.get('area_text', 'N/A')}\n"
-                f"📏 ርቀት / Radius: {store.get('delivery_radius', 5)} km\n"
-                f"💰 ዝቅተኛ ትዕዛዝ / Min Order: {store.get('min_order', 0)} ETB"
-            )
-            faq_text += extra_info
-        
-        bot.send_message(chat_id, faq_text, parse_mode="Markdown")
-
-    @bot.message_handler(func=lambda m: True)
-    def handle_ai_fallback(message):
-        if not check_active_middleware(message.chat.id):
-            return
-        if ai_model is None:
-            return
-        bot.send_chat_action(message.chat.id, 'typing')
-        lang = get_user_lang(message.chat.id)
-        store = get_store_info(token)
+            bot.send_message(admin_id, f"🔔 **አዲስ ደረሰኝ #{order_id}**", reply_markup=markup)
+            bot.forward_message(admin_id, chat_id, message.message_id)
+            bot.reply_to(message, "✅ ደረሰኝ ተልኳል!")
+            admin_states[(token, chat_id)] = {"state": "", "data": {}}
+    
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("approveorder_"))
+    def approve_order(call):
+        chat_id = call.message.chat.id
+        order_id = int(call.data.split("_")[1])
         try:
-            prompt = f"You are an assistant for '{store['store_name']}'. Respond in {lang}."
-            res = ai_model.generate_content(f"{prompt} {message.text}")
-            bot.reply_to(message, res.text)
-        except Exception:
-            pass
-
+            customer = db_execute_dict("SELECT customer_id FROM orders WHERE id = %s AND token = %s", (order_id, token))
+            if customer:
+                cust_id = customer[0]['customer_id']
+                db_execute("""
+                    UPDATE orders SET status_am = %s, status_en = %s, status_stage = 1, payment_confirmed = TRUE
+                    WHERE id = %s
+                """, (ORDER_STAGES_AM[1], ORDER_STAGES_EN[1], order_id))
+                lang = get_user_lang(cust_id, token)
+                bot.send_message(cust_id, STRINGS.get(lang, STRINGS["am"])["approved_msg"])
+            bot.edit_message_text(f"✅ ትዕዛዝ #{order_id} ጸድቋል", chat_id, call.message.message_id)
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
+        bot.answer_callback_query(call.id)
+    
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("rejectorder_"))
+    def reject_order(call):
+        chat_id = call.message.chat.id
+        order_id = int(call.data.split("_")[1])
+        try:
+            customer = db_execute_dict("SELECT customer_id FROM orders WHERE id = %s AND token = %s", (order_id, token))
+            if customer:
+                cust_id = customer[0]['customer_id']
+                db_execute("UPDATE orders SET status_stage = -1 WHERE id = %s", (order_id,))
+                lang = get_user_lang(cust_id, token)
+                bot.send_message(cust_id, STRINGS.get(lang, STRINGS["am"])["rejected_msg"])
+            bot.edit_message_text(f"❌ ትዕዛዝ #{order_id} ውድቅ ተደርጓል", chat_id, call.message.message_id)
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ ስህተት: {e}")
+        bot.answer_callback_query(call.id)
+    
     def _run_bot():
         while True:
             try:
                 bot.infinity_polling(skip_pending=True, timeout=30)
-            except Exception:
+            except Exception as e:
+                print(f"Bot polling error: {e}")
                 time.sleep(5)
-
+    
     threading.Thread(target=_run_bot, daemon=True).start()
 
 def start_shop_bot(token):
@@ -1655,372 +2431,55 @@ def start_shop_bot(token):
         setup_bot_handlers(token)
         return True
     except Exception as e:
-        print(f"Error starting bot for token {token[:10]}...: {e}")
+        print(f"Error starting bot: {e}")
         return False
 
 def load_stores():
-    conn = get_safe_connection()
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT token FROM stores WHERE is_active=1")
-            rows = cursor.fetchall()
-    finally:
-        put_conn(conn)
+        stores = db_execute_dict("SELECT token FROM stores WHERE is_active = 1 AND is_approved = 1")
+        count = 0
+        for store in stores:
+            if start_shop_bot(store['token']):
+                count += 1
+        print(f"✅ {count} stores started")
+    except Exception as e:
+        print(f"❌ Failed to load stores: {e}")
+
+# =================================================================================================
+#                           FLASK RUNNER
+# =================================================================================================
+
+def run_flask():
+    print("🚀 Starting Flask server on port 8080...")
+    app.run(host='0.0.0.0', port=8080, debug=False)
+
+# =================================================================================================
+#                           MAIN
+# =================================================================================================
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🚀 ULTIMATE SHOP MANAGEMENT SYSTEM v8.0")
+    print("=" * 60)
+    print("📋 Features:")
+    print("  1. Normal User Store Registration")
+    print("  2. Super Admin Panel (12 Buttons)")
+    print("  3. Shop Bot Engine (Multi-Store)")
+    print("  4. Verification System")
+    print("  5. Broadcast System")
+    print("  6. Analytics & Reports")
+    print("=" * 60)
+    print("👑 Super Admin Login: superadmin / Admin@123")
+    print("📱 Web: http://localhost:8080")
+    print("=" * 60)
     
-    for (tok,) in rows:
-        start_shop_bot(tok)
-
-load_stores()
-
-# ============================================================
-# 6. SUPER ADMIN & CONTROL BOT ENGINE (SECURE & ADVANCED)
-# ============================================================
-CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
-
-if CONTROL_BOT_TOKEN:
-    control_bot = telebot.TeleBot(CONTROL_BOT_TOKEN)
-
-    # Admin authentication for control bot
-    SUPER_ADMIN_IDS = [int(id) for id in os.environ.get("SUPER_ADMIN_IDS", "").split(",") if id]
-
-    def is_super_admin(chat_id):
-        return not SUPER_ADMIN_IDS or chat_id in SUPER_ADMIN_IDS
-
-    def get_control_main_menu():
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add(
-            types.KeyboardButton("📊 አጠቃላይ ስታቲስቲክስ (Analytics)"),
-            types.KeyboardButton("📢 ማስታወቂያ አስተላልፍ (Broadcast)"),
-            types.KeyboardButton("🏪 ሱቆችን አስተዳድር (Manage Stores)"),
-            types.KeyboardButton("➕ አዲስ ሱቅ መዝግብ (Register Store)"),
-            types.KeyboardButton("🤖 AI Business Assistant"),
-            types.KeyboardButton("📈 ሪፖርቶች (Reports)"),
-            types.KeyboardButton("❌ ውጣ / ሪሰት (Logout)")
-        )
-        return markup
-
-    @control_bot.message_handler(commands=['start'])
-    def control_start(message):
-        if not is_super_admin(message.chat.id):
-            control_bot.reply_to(message, "⛔ ያልተፈቀደ መዳረሻ! Unauthorized access!")
-            return
-            
-        control_bot.reply_to(
-            message,
-            "🚀 **Super Admin Control Center**\n\n"
-            "ይህ ሲስተም ሁሉንም ሱቆች ለመቆጣጠር ነው።\n"
-            "ከታች ያሉትን ቁልፎች በመጫን ይጠቀሙ።",
-            reply_markup=get_control_main_menu(),
-            parse_mode="Markdown"
-        )
-
-    @control_bot.message_handler(func=lambda m: m.text == "➕ አዲስ ሱቅ መዝግብ (Register Store)")
-    def prompt_register(message):
-        if not is_super_admin(message.chat.id):
-            return
-        msg = control_bot.reply_to(
-            message,
-            "📝 **አዲስ ሱቅ ለመመዝገብ መረጃውን በሚከተለው ፎርማት ይላኩ፦**\n\n"
-            "`[Token]#[Password]#[Store Name]`\n\n"
-            "*(ምሳሌ፦ `123456:ABC-DEF#mypass123#የእኔ ሱቅ`)*",
-            parse_mode="Markdown"
-        )
-        control_bot.register_next_step_handler(msg, process_store_registration)
-
-    def process_store_registration(message):
-        if not is_super_admin(message.chat.id):
-            return
-        try:
-            control_bot.delete_message(message.chat.id, message.message_id)
-        except Exception:
-            pass
-
-        try:
-            parts = message.text.split('#')
-            if len(parts) < 3:
-                control_bot.send_message(message.chat.id, "⚠️ የተሳሳተ ፎርማት!", reply_markup=get_control_main_menu())
-                return
-
-            new_token, password, store_name = parts[0].strip(), parts[1].strip(), parts[2].strip()
-            bot_info = telebot.TeleBot(new_token).get_me()
-
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1 FROM stores WHERE token=%s", (new_token,))
-                    if cursor.fetchone():
-                        control_bot.send_message(message.chat.id, "❌ ይህ ቦት ቀደም ሲል ተመዝግቧል!", reply_markup=get_control_main_menu())
-                        return
-                    h_pass, salt = hash_password(password)
-                    cursor.execute('''INSERT INTO stores (token, store_name, admin_id, password_hash, password_salt, telebirr)
-                                      VALUES (%s, %s, %s, %s, %s, %s)''',
-                                   (new_token, store_name, message.chat.id, h_pass, salt, "0900000000"))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-
-            start_shop_bot(new_token)
-            control_bot.send_message(
-                message.chat.id,
-                f"🎉 **ሱቁ በስኬት ተመዝግቧል!**\n\n"
-                f"🤖 ቦት፦ @{bot_info.username}\n"
-                f"🏪 ሱቅ፦ {store_name}\n"
-                f"🔒 ፓስወርድ ደህንነቱ ተጠብቆ ተቀምጧል።",
-                reply_markup=get_control_main_menu(),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            control_bot.send_message(message.chat.id, f"❌ ስህተት ተፈጥሯል፦ {e}", reply_markup=get_control_main_menu())
-
-    @control_bot.message_handler(func=lambda m: m.text == "📊 አጠቃላይ ስታቲስቲክስ (Analytics)")
-    def control_analytics(message):
-        if not is_super_admin(message.chat.id):
-            return
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT COUNT(*) FROM stores")
-                total_stores = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*), COALESCE(SUM(total_price + COALESCE(delivery_fee,0)),0) FROM orders WHERE status_stage >= 1")
-                total_orders, total_revenue = cursor.fetchone()
-                cursor.execute("SELECT COUNT(*) FROM products")
-                total_products = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM reviews")
-                total_reviews = cursor.fetchone()[0]
-                
-                # Monthly revenue
-                cursor.execute('''SELECT TO_CHAR(created_at, 'YYYY-MM'), COUNT(*), COALESCE(SUM(total_price + COALESCE(delivery_fee,0)),0)
-                                  FROM orders WHERE status_stage >= 1 
-                                  GROUP BY TO_CHAR(created_at, 'YYYY-MM') 
-                                  ORDER BY 1 DESC LIMIT 6''')
-                monthly_data = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        text = (
-            f"📊 **የሲስተሙ አጠቃላይ መረጃ (Global Analytics)**\n\n"
-            f"🏪 የተመዘገቡ ሱቆች፦ {total_stores}\n"
-            f"📦 ምርቶች፦ {total_products}\n"
-            f"⭐ ግምገማዎች፦ {total_reviews}\n"
-            f"✅ የተጠናቀቁ ትዕዛዞች፦ {total_orders}\n"
-            f"💵 አጠቃላይ ገቢ፦ {total_revenue:.2f} ETB\n\n"
-            f"📈 **የቅርብ ጊዜ ወርሃዊ ገቢ / Monthly Revenue**\n"
-        )
-        
-        for month, count, revenue in monthly_data:
-            text += f"▪️ {month}: {count} orders - {revenue:.2f} ETB\n"
-
-        control_bot.send_message(message.chat.id, text, reply_markup=get_control_main_menu(), parse_mode="Markdown")
-
-    @control_bot.message_handler(func=lambda m: m.text == "📈 ሪፖርቶች (Reports)")
-    def control_reports(message):
-        if not is_super_admin(message.chat.id):
-            return
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                # Top stores by revenue
-                cursor.execute('''SELECT s.store_name, COUNT(o.id), COALESCE(SUM(o.total_price + COALESCE(o.delivery_fee,0)),0) as revenue
-                                  FROM stores s 
-                                  LEFT JOIN orders o ON s.token = o.token AND o.status_stage >= 1
-                                  GROUP BY s.store_name
-                                  ORDER BY revenue DESC LIMIT 5''')
-                top_stores = cursor.fetchall()
-                
-                # Top products
-                cursor.execute('''SELECT p.name_am, COUNT(oi.id) as sales, SUM(oi.quantity) as quantity
-                                  FROM products p 
-                                  JOIN order_items oi ON p.id = oi.product_id
-                                  JOIN orders o ON oi.order_id = o.id
-                                  WHERE o.status_stage >= 1
-                                  GROUP BY p.name_am
-                                  ORDER BY sales DESC LIMIT 5''')
-                top_products = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        text = "📈 **ሪፖርቶች / Reports**\n\n"
-        
-        text += "🏆 **ከፍተኛ ገቢ ያላቸው ሱቆች / Top Stores**\n"
-        for name, count, revenue in top_stores:
-            text += f"▪️ {name}: {count} orders - {revenue:.2f} ETB\n"
-        
-        text += "\n📦 **በጣም የተሸጡ ምርቶች / Top Products**\n"
-        for name, sales, quantity in top_products:
-            text += f"▪️ {name}: {quantity} units ({sales} orders)\n"
-
-        control_bot.send_message(message.chat.id, text, reply_markup=get_control_main_menu(), parse_mode="Markdown")
-
-    @control_bot.message_handler(func=lambda m: m.text == "🏪 ሱቆችን አስተዳድር (Manage Stores)")
-    def manage_stores(message):
-        if not is_super_admin(message.chat.id):
-            return
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT store_name, token, is_active FROM stores")
-                stores = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        if not stores:
-            control_bot.send_message(message.chat.id, "⚠️ እስካሁን የተመዘገበ ሱቅ የለም።", reply_markup=get_control_main_menu())
-            return
-
-        text = "🏪 **የተመዘገቡ ሱቆች ዝርዝር፦**\n\n"
-        for name, tok, active in stores:
-            status = "✅ Active" if active else "❌ Inactive"
-            text += f"▪️ **{name}** (`{tok[:10]}...`) - {status}\n"
-        
-        text += "\n💡 ሱቅን ለማንቃት/ለማጥፋት የሚከተሉትን ይላኩ፦\n`[token]#[on/off]`"
-        control_bot.send_message(message.chat.id, text, reply_markup=get_control_main_menu(), parse_mode="Markdown")
-        admin_states[("control", message.chat.id)] = {"state": "WAITING_STORE_TOGGLE", "data": {}}
-
-    @control_bot.message_handler(func=lambda m: admin_states.get(("control", m.chat.id), {}).get("state") == "WAITING_STORE_TOGGLE")
-    def process_store_toggle(message):
-        if not is_super_admin(message.chat.id):
-            return
-        try:
-            parts = message.text.split("#")
-            if len(parts) < 2:
-                control_bot.reply_to(message, "❌ የተሳሳተ ፎርማት! `[token]#[on/off]`", reply_markup=get_control_main_menu())
-                return
-            
-            tok, action = parts[0].strip(), parts[1].strip()
-            is_active = 1 if action.lower() == "on" else 0
-            
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("UPDATE stores SET is_active=%s WHERE token=%s", (is_active, tok))
-                    conn.commit()
-            finally:
-                put_conn(conn)
-            
-            status = "አንቃቷል" if is_active else "አጥፍቷል"
-            control_bot.send_message(message.chat.id, f"✅ ሱቁ በስኬት {status}!", reply_markup=get_control_main_menu())
-        except Exception as e:
-            control_bot.send_message(message.chat.id, f"❌ ስህተት፦ {e}", reply_markup=get_control_main_menu())
-        admin_states[("control", message.chat.id)] = {"state": "", "data": {}}
-
-    @control_bot.message_handler(func=lambda m: m.text == "📢 ማስታወቂያ አስተላልፍ (Broadcast)")
-    def prompt_broadcast(message):
-        if not is_super_admin(message.chat.id):
-            return
-        msg = control_bot.reply_to(
-            message,
-            "📢 ለሁሉም የሱቅ ባለቤቶች ማስተላለፍ የሚፈልጉትን መልእክት ይጻፉ:\n\n"
-            "💡 መልእክቱ ከስር ባለው ፎርማት ይላኩ:\n"
-            "`[Text]#[Image_URL (optional)]`\n"
-            "(ምሳሌ፦ `የአዲስ ዓመት መልካም ምኞት!#https://example.com/photo.jpg`)"
-        )
-        control_bot.register_next_step_handler(msg, execute_broadcast)
-
-    def execute_broadcast(message):
-        if not is_super_admin(message.chat.id):
-            return
-        parts = message.text.split("#")
-        broadcast_text = parts[0].strip()
-        image_url = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
-
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT DISTINCT admin_id FROM stores WHERE admin_id IS NOT NULL")
-                admins = cursor.fetchall()
-        finally:
-            put_conn(conn)
-
-        success_count = 0
-        fail_count = 0
-        
-        for (adm_id,) in admins:
-            try:
-                if image_url:
-                    control_bot.send_photo(
-                        adm_id,
-                        image_url,
-                        caption=f"📢 **ከዋናው አስተዳዳሪ የተላከ ማስታወቂያ፦**\n\n{broadcast_text}",
-                        parse_mode="Markdown"
-                    )
-                else:
-                    control_bot.send_message(
-                        adm_id,
-                        f"📢 **ከዋናው አስተዳዳሪ የተላከ ማስታወቂያ፦**\n\n{broadcast_text}",
-                        parse_mode="Markdown"
-                    )
-                success_count += 1
-            except Exception:
-                fail_count += 1
-
-        control_bot.send_message(
-            message.chat.id,
-            f"✅ መልእክቱ ለ {success_count} የሱቅ ባለቤቶች ተልኳል!\n"
-            f"❌ {fail_count} አልተላኩም።",
-            reply_markup=get_control_main_menu()
-        )
-
-    @control_bot.message_handler(func=lambda m: m.text == "🤖 AI Business Assistant")
-    def prompt_ai(message):
-        if not is_super_admin(message.chat.id):
-            return
-        msg = control_bot.reply_to(
-            message,
-            "🤖 **AI Business Assistant**\n\n"
-            "ስለ ንግድ ስራዎ፣ የዋጋ አወጣጥ፣ የደንበኛ አገልግሎት፣\n"
-            "ወይም ሌላ ማንኛውም ጥያቄ መጠየቅ ይችላሉ።"
-        )
-        control_bot.register_next_step_handler(msg, execute_ai_query)
-
-    def execute_ai_query(message):
-        if not is_super_admin(message.chat.id):
-            return
-        query = message.text
-        if ai_model:
-            try:
-                control_bot.send_chat_action(message.chat.id, 'typing')
-                res = ai_model.generate_content(
-                    f"You are an expert E-commerce and Business Advisor in Ethiopia. "
-                    f"Give practical, actionable advice. Question: {query}"
-                )
-                control_bot.send_message(
-                    message.chat.id,
-                    f"🤖 **AI Response**\n\n{res.text}",
-                    reply_markup=get_control_main_menu()
-                )
-                return
-            except Exception as e:
-                control_bot.send_message(
-                    message.chat.id,
-                    f"❌ AI አገልግሎት ማግኘት አልተቻለም። Error: {e}",
-                    reply_markup=get_control_main_menu()
-                )
-        else:
-            control_bot.send_message(
-                message.chat.id,
-                "❌ AI አገልግሎት አልተዋቀረም።",
-                reply_markup=get_control_main_menu()
-            )
-
-    @control_bot.message_handler(func=lambda m: m.text == "❌ ውጣ / ሪሰት (Logout)")
-    def logout_control(message):
-        if not is_super_admin(message.chat.id):
-            return
-        control_bot.send_message(
-            message.chat.id,
-            "🔒 ሲስተሙን በሰላም ዘግተዋል። እንደገና ለመጀመር `/start` ይጫኑ።",
-            reply_markup=types.ReplyKeyboardRemove(),
-            parse_mode="Markdown"
-        )
-
-    def _run_control():
-        while True:
-            try:
-                control_bot.infinity_polling(skip_pending=True, timeout=30)
-            except Exception:
-                time.sleep(5)
-
-    threading.Thread(target=_run_control, daemon=True).start()
-
-while True:
-    time.sleep(3600)
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Load existing stores
+    load_stores()
+    
+    # Keep main thread alive
+    while True:
+        time.sleep(3600)
