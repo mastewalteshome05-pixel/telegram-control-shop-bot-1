@@ -1,33 +1,34 @@
 """
 ====================================================================================================
-                    🚀 ULTIMATE MULTI-TENANT SHOP BOT v5.0 🚀
-        የላቀ ባለብዙ ሱቅ አስተዳደር ሲስተም - Enterprise Grade Control Panel
+                    🚀 ULTIMATE CONTROL BOT v6.0 🚀
+        ከ1000+ ቦቶች ማስተዳደር የሚችል የላቀ ሲስተም
 ====================================================================================================
 
 የዚህ ሲስተም ባህሪያት:
-    ✅ Multi-Tenant Store Registration
-    ✅ Product Management (CRUD)
-    ✅ AI-Powered Natural Language Search (Gemini)
-    ✅ Shopping Cart & Checkout System
+    ✅ ከ1000+ ቦቶች ማስተዳደር (Multi-Bot Management)
+    ✅ ሱቅ ምዝገባ (Store Registration)
+    ✅ ምርቶችን መመዝገብ እና ማስተዳደር (Product Management)
+    ✅ AI-Powered Smart Search (Gemini)
+    ✅ Shopping Cart & Checkout
     ✅ AI-Powered Payment Receipt Verification
-    ✅ Super Admin Dashboard with Full Control
+    ✅ Super Admin Dashboard
     ✅ Store Approval Queue
-    ✅ System Analytics & Statistics
-    ✅ Broadcast Messaging System
+    ✅ System Analytics
+    ✅ Broadcast Messaging
     ✅ Store Suspension/Block
-    ✅ Advanced Security (Input Sanitization, SQL Injection Protection)
-    ✅ Environment Variables for Secrets
+    ✅ Advanced Security
     ✅ Database Connection Pooling
     ✅ Thread-Safe Operations
     ✅ Comprehensive Logging
-    ✅ Error Recovery System
-    ✅ Rate Limiting
-    ✅ Session Management
     ✅ Audit Trail
-    ✅ Multi-Language Support (አማርኛ / English)
+    ✅ Multi-Language Support
     ✅ REST API Endpoints
     ✅ Web Dashboard
     ✅ Health Checks
+    ✅ Bot Performance Monitoring
+    ✅ Auto-Restart on Crash
+    ✅ Rate Limiting
+    ✅ Session Management
 
 ====================================================================================================
 """
@@ -47,11 +48,13 @@ import io
 import base64
 import tempfile
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple, Union
-from dataclasses import dataclass, asdict
-from collections import defaultdict
+from typing import Dict, List, Optional, Any, Tuple, Union, Callable
+from dataclasses import dataclass, asdict, field
+from collections import defaultdict, deque
 from functools import wraps
 from contextlib import contextmanager
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Third-party imports
 import telebot
@@ -72,12 +75,12 @@ from urllib3.util.retry import Retry
 # =================================================================================================
 
 class Config:
-    """የሲስተም ውቅር ክፍል - All environment variables"""
+    """የሲስተም ውቅር ክፍል"""
     
     # ==================== DATABASE ====================
     DATABASE_URL = os.environ.get("DATABASE_URL")
-    DATABASE_POOL_MIN = int(os.environ.get("DATABASE_POOL_MIN", "2"))
-    DATABASE_POOL_MAX = int(os.environ.get("DATABASE_POOL_MAX", "20"))
+    DATABASE_POOL_MIN = int(os.environ.get("DATABASE_POOL_MIN", "5"))
+    DATABASE_POOL_MAX = int(os.environ.get("DATABASE_POOL_MAX", "50"))
     
     # ==================== BOT TOKENS ====================
     CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
@@ -91,11 +94,18 @@ class Config:
     PORT = int(os.environ.get("PORT", "8080"))
     HOST = os.environ.get("HOST", "0.0.0.0")
     SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+    MAX_BOTS = int(os.environ.get("MAX_BOTS", "1000"))
     
     # ==================== SECURITY ====================
-    SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "7200"))  # 2 hours
+    SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "7200"))
     MAX_LOGIN_ATTEMPTS = int(os.environ.get("MAX_LOGIN_ATTEMPTS", "5"))
-    LOCKOUT_DURATION = int(os.environ.get("LOCKOUT_DURATION", "900"))  # 15 minutes
+    LOCKOUT_DURATION = int(os.environ.get("LOCKOUT_DURATION", "900"))
+    API_RATE_LIMIT = int(os.environ.get("API_RATE_LIMIT", "60"))
+    
+    # ==================== BOT MANAGEMENT ====================
+    BOT_RESTART_DELAY = int(os.environ.get("BOT_RESTART_DELAY", "5"))
+    BOT_HEALTH_CHECK_INTERVAL = int(os.environ.get("BOT_HEALTH_CHECK_INTERVAL", "60"))
+    MAX_BOT_RESTARTS = int(os.environ.get("MAX_BOT_RESTARTS", "5"))
     
     # ==================== DELIVERY ====================
     BASE_DELIVERY_FEE = float(os.environ.get("BASE_DELIVERY_FEE", "30"))
@@ -115,21 +125,77 @@ if not Config.CONTROL_BOT_TOKEN:
 #                           LOGGING SYSTEM
 # =================================================================================================
 
-logging.basicConfig(
-    level=getattr(logging, Config.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('ControlBot')
+class Logger:
+    """የላቀ ሎግ ሲስተም"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialize()
+        return cls._instance
+    
+    def _initialize(self):
+        self.logger = logging.getLogger('ControlBot')
+        self.logger.setLevel(getattr(logging, Config.LOG_LEVEL))
+        
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
+        
+        # File handler
+        try:
+            file_handler = logging.FileHandler(Config.LOG_FILE)
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+        except:
+            pass
+        
+        # Log buffer for real-time monitoring
+        self._log_buffer = deque(maxlen=1000)
+        self._buffer_lock = threading.Lock()
+    
+    def _log(self, level: str, message: str, **kwargs):
+        log_method = getattr(self.logger, level.lower(), self.logger.info)
+        log_method(message)
+        
+        with self._buffer_lock:
+            self._log_buffer.append({
+                'timestamp': datetime.now().isoformat(),
+                'level': level,
+                'message': message,
+                'context': kwargs
+            })
+    
+    def debug(self, msg, **kwargs): self._log('DEBUG', msg, **kwargs)
+    def info(self, msg, **kwargs): self._log('INFO', msg, **kwargs)
+    def warning(self, msg, **kwargs): self._log('WARNING', msg, **kwargs)
+    def error(self, msg, **kwargs): self._log('ERROR', msg, **kwargs)
+    def critical(self, msg, **kwargs): self._log('CRITICAL', msg, **kwargs)
+    
+    def audit(self, user_id: int, action: str, details: dict = None, success: bool = True):
+        """Audit log"""
+        try:
+            db_execute("""
+                INSERT INTO audit_logs (user_id, action, details, success, created_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            """, (user_id, action, json.dumps(details) if details else None, success))
+        except Exception as e:
+            self.error(f"Audit log error: {e}")
+    
+    def get_logs(self, limit: int = 100):
+        with self._buffer_lock:
+            return list(self._log_buffer)[-limit:]
 
-# File handler for persistent logs
-try:
-    file_handler = logging.FileHandler(Config.LOG_FILE)
-    file_handler.setLevel(logging.INFO)
-    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-except Exception as e:
-    print(f"⚠️ Could not create log file: {e}")
+logger = Logger()
 
 # =================================================================================================
 #                           DATABASE LAYER
@@ -139,7 +205,6 @@ db_pool = None
 db_pool_lock = threading.Lock()
 
 def init_db_pool():
-    """Initialize database connection pool"""
     global db_pool
     with db_pool_lock:
         if db_pool is None:
@@ -149,53 +214,44 @@ def init_db_pool():
                     Config.DATABASE_POOL_MAX,
                     dsn=Config.DATABASE_URL
                 )
-                # Test connection
                 conn = db_pool.getconn()
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                 db_pool.putconn(conn)
-                logger.info("✅ Database connection pool initialized")
+                logger.info(f"✅ Database pool initialized (min={Config.DATABASE_POOL_MIN}, max={Config.DATABASE_POOL_MAX})")
             except Exception as e:
                 logger.error(f"❌ Database pool initialization failed: {e}")
                 raise
 
 def get_db_connection():
-    """Get database connection from pool"""
     global db_pool
     if db_pool is None:
         init_db_pool()
     
-    try:
-        conn = db_pool.getconn()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        return conn
-    except Exception as e:
-        logger.error(f"❌ Failed to get connection: {e}")
-        with db_pool_lock:
-            try:
-                if db_pool:
-                    db_pool.closeall()
-            except:
-                pass
-            db_pool = None
-            init_db_pool()
-        return db_pool.getconn()
+    for attempt in range(3):
+        try:
+            conn = db_pool.getconn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return conn
+        except Exception as e:
+            logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                raise
 
 def put_db_connection(conn):
-    """Return connection to pool"""
     if conn is not None and db_pool is not None:
         try:
             db_pool.putconn(conn)
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to return connection: {e}")
+        except:
             try:
                 conn.close()
             except:
                 pass
 
 def db_execute(query: str, params: tuple = None, fetch: bool = False):
-    """Execute database query with parameters"""
     conn = None
     try:
         conn = get_db_connection()
@@ -206,7 +262,7 @@ def db_execute(query: str, params: tuple = None, fetch: bool = False):
             conn.commit()
             return cur.rowcount if cur.rowcount > 0 else None
     except Exception as e:
-        logger.error(f"❌ Database query error: {e}\nQuery: {query[:200]}")
+        logger.error(f"Database error: {e}\nQuery: {query[:200]}")
         if conn:
             try:
                 conn.rollback()
@@ -218,7 +274,6 @@ def db_execute(query: str, params: tuple = None, fetch: bool = False):
             put_db_connection(conn)
 
 def db_execute_dict(query: str, params: tuple = None):
-    """Execute query and return results as dictionaries"""
     conn = None
     try:
         conn = get_db_connection()
@@ -226,7 +281,7 @@ def db_execute_dict(query: str, params: tuple = None):
             cur.execute(query, params or ())
             return cur.fetchall()
     except Exception as e:
-        logger.error(f"❌ Database query error: {e}")
+        logger.error(f"Database error: {e}")
         raise
     finally:
         if conn:
@@ -237,7 +292,6 @@ def db_execute_dict(query: str, params: tuple = None):
 # =================================================================================================
 
 def init_schema():
-    """Initialize database schema with all tables"""
     schema = """
     -- =====================================================
     -- STORES TABLE
@@ -264,6 +318,9 @@ def init_schema():
         rating REAL DEFAULT 0,
         total_sales REAL DEFAULT 0,
         total_orders INTEGER DEFAULT 0,
+        bot_status TEXT DEFAULT 'stopped',
+        last_restart TIMESTAMP,
+        restart_count INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -283,7 +340,6 @@ def init_schema():
         desc_en TEXT,
         image_url TEXT,
         category_id INTEGER,
-        subcategory_id INTEGER,
         is_active INTEGER DEFAULT 1,
         sales_count INTEGER DEFAULT 0,
         rating REAL DEFAULT 0,
@@ -301,7 +357,6 @@ def init_schema():
         name_en TEXT,
         icon TEXT,
         parent_id INTEGER DEFAULT 0,
-        display_order INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -312,7 +367,6 @@ def init_schema():
         id SERIAL PRIMARY KEY,
         token TEXT NOT NULL,
         customer_id BIGINT NOT NULL,
-        customer_name TEXT,
         customer_phone TEXT,
         status_am TEXT DEFAULT 'በመጠባበቅ ላይ',
         status_en TEXT DEFAULT 'Pending',
@@ -320,11 +374,9 @@ def init_schema():
         total_price REAL NOT NULL,
         delivery_fee REAL DEFAULT 0,
         discount REAL DEFAULT 0,
-        commission REAL DEFAULT 0,
         payment_method TEXT,
         payment_status TEXT DEFAULT 'pending',
         payment_receipt_url TEXT,
-        tracking_number TEXT,
         delivery_address TEXT,
         delivery_lat REAL,
         delivery_lng REAL,
@@ -344,7 +396,6 @@ def init_schema():
         product_name TEXT,
         qty INTEGER NOT NULL,
         price REAL NOT NULL,
-        discount REAL DEFAULT 0,
         total REAL NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -368,7 +419,6 @@ def init_schema():
         lng REAL,
         address TEXT,
         city TEXT,
-        subcity TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -386,28 +436,24 @@ def init_schema():
     );
 
     -- =====================================================
-    -- CART TABLE (Temporary cart storage)
+    -- BOT METRICS TABLE
     -- =====================================================
-    CREATE TABLE IF NOT EXISTS carts (
+    CREATE TABLE IF NOT EXISTS bot_metrics (
         id SERIAL PRIMARY KEY,
         token TEXT NOT NULL,
-        customer_id BIGINT NOT NULL,
-        product_id INTEGER NOT NULL,
-        qty INTEGER NOT NULL,
-        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(token, customer_id, product_id)
+        metric_name TEXT NOT NULL,
+        metric_value REAL,
+        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
     -- =====================================================
     -- INDEXES
     -- =====================================================
     CREATE INDEX IF NOT EXISTS idx_products_token ON products(token);
-    CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
     CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token);
     CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
-    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status_stage);
-    CREATE INDEX IF NOT EXISTS idx_carts_customer ON carts(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_bot_metrics_token ON bot_metrics(token);
     CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
     """
     
@@ -418,24 +464,20 @@ def init_schema():
         logger.error(f"❌ Schema initialization failed: {e}")
         raise
 
-# Initialize database
 init_db_pool()
 init_schema()
 
 # =================================================================================================
-#                           AI ENGINE (Gemini Integration)
+#                           AI ENGINE (Gemini)
 # =================================================================================================
 
 class AIEngine:
-    """የላቀ AI ሞተር - Gemini Integration"""
-    
     _model = None
     _vision_model = None
     _initialized = False
     
     @classmethod
     def init(cls):
-        """Initialize Gemini AI models"""
         if cls._initialized:
             return
         
@@ -445,50 +487,43 @@ class AIEngine:
                 cls._model = genai.GenerativeModel('gemini-1.5-flash')
                 cls._vision_model = genai.GenerativeModel('gemini-1.5-flash')
                 cls._initialized = True
-                logger.info("✅ Gemini AI initialized successfully")
+                logger.info("✅ Gemini AI initialized")
             except Exception as e:
-                logger.error(f"❌ Gemini AI initialization failed: {e}")
+                logger.error(f"❌ Gemini AI init failed: {e}")
                 cls._initialized = False
         else:
-            logger.warning("⚠️ GEMINI_API_KEY not set, AI features disabled")
+            logger.warning("⚠️ GEMINI_API_KEY not set")
             cls._initialized = False
     
     @classmethod
     def is_available(cls) -> bool:
-        """Check if AI is available"""
         return cls._initialized and cls._model is not None
     
     @classmethod
     def generate_response(cls, prompt: str, context: str = "") -> Optional[str]:
-        """Generate AI response"""
         if not cls.is_available():
             return None
-        
         try:
-            full_prompt = f"{context}\n\n{prompt}"
-            response = cls._model.generate_content(full_prompt)
+            response = cls._model.generate_content(f"{context}\n\n{prompt}")
             return response.text if response else None
         except Exception as e:
             logger.error(f"AI generation error: {e}")
             return None
     
     @classmethod
-    def search_products(cls, query: str, products: List[Dict], lang: str = "am") -> List[Dict]:
-        """AI-Powered product search using natural language"""
+    def search_products(cls, query: str, products: List[Dict]) -> List[Dict]:
         if not cls.is_available():
             return None
-        
         try:
-            # Build product list for context
             product_text = ""
-            for p in products[:50]:  # Limit to 50 products for context
-                name = p.get('name_am', '') if lang == 'am' else p.get('name_en', '')
+            for p in products[:50]:
+                name = p.get('name_am', '')
                 price = p.get('price', 0)
-                desc = p.get('desc_am', '') if lang == 'am' else p.get('desc_en', '')
+                desc = p.get('desc_am', '')
                 product_text += f"- ID:{p['id']}, Name:{name}, Price:{price} ETB, Desc:{desc}\n"
             
             prompt = f"""
-            You are a smart product search assistant. Analyze the user's query and find matching products.
+            Analyze the user's query and find matching products.
             
             Available products:
             {product_text}
@@ -497,7 +532,6 @@ class AIEngine:
             
             Return ONLY the product IDs that match, separated by commas.
             If no products match, return "NONE".
-            Consider price ranges, categories, and descriptions in your analysis.
             """
             
             response = cls._model.generate_content(prompt)
@@ -506,12 +540,10 @@ class AIEngine:
             if result == "NONE" or not result:
                 return []
             
-            # Extract IDs
             ids = re.findall(r'\d+', result)
             if not ids:
                 return []
             
-            # Get matching products
             placeholders = ','.join(['%s'] * len(ids))
             matched = db_execute_dict(
                 f"""
@@ -523,51 +555,40 @@ class AIEngine:
                 tuple(ids)
             )
             return matched
-            
         except Exception as e:
             logger.error(f"AI search error: {e}")
             return None
     
     @classmethod
     def verify_payment_receipt(cls, image_data: bytes, expected_amount: float) -> Tuple[bool, str]:
-        """
-        AI-Powered payment receipt verification using Gemini Vision
-        Verifies Telebirr, CBE, and Bank receipts
-        """
         if not cls.is_available():
-            return False, "AI model not configured. Please contact support."
-        
+            return False, "AI model not configured."
         try:
-            # Open image
             img = Image.open(io.BytesIO(image_data))
             
             prompt = f"""
-            Analyze this payment receipt image for an e-commerce transaction.
-            Check the following details:
-            1. Is it a valid payment receipt (Telebirr, CBE Birr, or Bank)?
-            2. Does the transferred amount match or exceed {expected_amount} ETB?
-            3. Is the receipt genuine (not a screenshot from another transaction)?
+            Analyze this payment receipt image.
+            Check:
+            1. Is it a valid payment receipt?
+            2. Does the amount match or exceed {expected_amount} ETB?
+            3. Is the receipt genuine?
             
-            Respond strictly in this format:
+            Respond:
             status: VALID or INVALID
-            amount_found: [extracted number or 0]
-            payment_method: [Telebirr/CBE/Bank/Unknown]
-            reason: [short explanation of the verification result]
+            amount_found: [number or 0]
+            reason: [short explanation]
             """
             
             response = cls._vision_model.generate_content([prompt, img])
             result_text = response.text.strip()
             logger.info(f"AI Receipt Analysis: {result_text}")
             
-            # Parse result
             is_valid = "status: VALID" in result_text.upper()
             return is_valid, result_text
-            
         except Exception as e:
             logger.error(f"Receipt verification error: {e}")
-            return False, f"Verification error: {str(e)}"
+            return False, f"Error: {str(e)}"
 
-# Initialize AI
 AIEngine.init()
 
 # =================================================================================================
@@ -575,19 +596,12 @@ AIEngine.init()
 # =================================================================================================
 
 def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
-    """Hash password with salt"""
     if not salt:
         salt = secrets.token_hex(16)
     hashed = hashlib.sha256((password + salt).encode()).hexdigest()
     return hashed, salt
 
-def verify_password(password: str, hashed: str, salt: str) -> bool:
-    """Verify password"""
-    test_hash, _ = hash_password(password, salt)
-    return test_hash == hashed
-
 def calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Calculate distance in km using Haversine formula"""
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     d_phi = math.radians(lat2 - lat1)
@@ -596,49 +610,37 @@ def calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> fl
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 def calculate_delivery_fee(distance_km: float) -> float:
-    """Calculate delivery fee"""
     if distance_km <= 0:
         return 0
     return round(Config.BASE_DELIVERY_FEE + (distance_km * Config.PER_KM_RATE), 2)
 
 def format_currency(amount: float) -> str:
-    """Format currency"""
     return f"{amount:,.2f} ETB"
 
 def format_date(dt: datetime) -> str:
-    """Format datetime"""
     return dt.strftime("%Y-%m-%d %H:%M")
 
 def safe_int(value: Any, default: int = 0) -> int:
-    """Convert to int safely"""
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except:
         return default
 
 def safe_float(value: Any, default: float = 0.0) -> float:
-    """Convert to float safely"""
     try:
         return float(value)
-    except (ValueError, TypeError):
+    except:
         return default
 
 def sanitize_input(text: str) -> str:
-    """Sanitize user input to prevent SQL injection and XSS"""
     if not text:
         return ""
-    # Remove dangerous characters
-    text = re.sub(r'[;\'"]', '', text)
-    # Limit length
+    text = re.sub(r'[;\'"<>]', '', text)
     return text[:1000]
 
 def get_user_lang(chat_id: int) -> str:
-    """Get user's preferred language"""
     try:
-        result = db_execute(
-            "SELECT lang FROM user_langs WHERE chat_id = %s",
-            (chat_id,), fetch=True
-        )
+        result = db_execute("SELECT lang FROM user_langs WHERE chat_id = %s", (chat_id,), fetch=True)
         if result:
             return result[0][0]
     except:
@@ -646,7 +648,6 @@ def get_user_lang(chat_id: int) -> str:
     return "am"
 
 def set_user_lang(chat_id: int, lang: str):
-    """Set user's preferred language"""
     try:
         db_execute(
             "INSERT INTO user_langs (chat_id, lang) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET lang = EXCLUDED.lang",
@@ -656,15 +657,14 @@ def set_user_lang(chat_id: int, lang: str):
         logger.error(f"Set user lang error: {e}")
 
 def get_store_info(token: str) -> Optional[Dict]:
-    """Get store information by token"""
     try:
-        result = db_execute_dict(
-            """SELECT id, store_name, admin_id, username, is_active, is_approved, 
-                      area_text, shop_description, shop_lat, shop_lng,
-                      telebirr, cbebirr, bank_name, bank_account
-               FROM stores WHERE token = %s""",
-            (token,)
-        )
+        result = db_execute_dict("""
+            SELECT id, store_name, admin_id, username, is_active, is_approved,
+                   area_text, shop_description, shop_lat, shop_lng,
+                   telebirr, cbebirr, bank_name, bank_account,
+                   bot_status, restart_count
+            FROM stores WHERE token = %s
+        """, (token,))
         if result:
             return dict(result[0])
         return None
@@ -672,40 +672,35 @@ def get_store_info(token: str) -> Optional[Dict]:
         logger.error(f"Get store info error: {e}")
         return None
 
-def get_customer_info(chat_id: int) -> Optional[Dict]:
-    """Get customer information"""
+def update_bot_status(token: str, status: str):
     try:
-        result = db_execute_dict(
-            "SELECT phone, lat, lng, address FROM customer_info WHERE chat_id = %s",
-            (chat_id,)
+        db_execute(
+            "UPDATE stores SET bot_status = %s, updated_at = CURRENT_TIMESTAMP WHERE token = %s",
+            (status, token)
+        )
+    except Exception as e:
+        logger.error(f"Update bot status error: {e}")
+
+def get_bot_metrics(token: str, metric: str) -> float:
+    try:
+        result = db_execute(
+            "SELECT metric_value FROM bot_metrics WHERE token = %s AND metric_name = %s ORDER BY recorded_at DESC LIMIT 1",
+            (token, metric), fetch=True
         )
         if result:
-            return dict(result[0])
-        return None
-    except Exception as e:
-        logger.error(f"Get customer info error: {e}")
-        return None
+            return safe_float(result[0][0])
+        return 0
+    except:
+        return 0
 
-def save_customer_info(chat_id: int, phone: str = None, lat: float = None, lng: float = None, address: str = None):
-    """Save or update customer information"""
+def record_bot_metric(token: str, metric: str, value: float):
     try:
-        if phone:
-            db_execute(
-                "INSERT INTO customer_info (chat_id, phone) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET phone = EXCLUDED.phone",
-                (chat_id, phone)
-            )
-        if lat is not None and lng is not None:
-            db_execute(
-                "INSERT INTO customer_info (chat_id, lat, lng) VALUES (%s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng",
-                (chat_id, lat, lng)
-            )
-        if address:
-            db_execute(
-                "INSERT INTO customer_info (chat_id, address) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET address = EXCLUDED.address",
-                (chat_id, address)
-            )
+        db_execute(
+            "INSERT INTO bot_metrics (token, metric_name, metric_value) VALUES (%s, %s, %s)",
+            (token, metric, value)
+        )
     except Exception as e:
-        logger.error(f"Save customer info error: {e}")
+        logger.error(f"Record metric error: {e}")
 
 # =================================================================================================
 #                           FLASK WEB SERVER
@@ -721,13 +716,13 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Control Bot Dashboard</title>
+        <title>Ultimate Control Bot</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-            .container { background: white; border-radius: 20px; padding: 40px; max-width: 800px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+            .container { background: white; border-radius: 20px; padding: 40px; max-width: 900px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
             h1 { color: #333; font-size: 2.5em; margin-bottom: 10px; }
             .subtitle { color: #666; margin-bottom: 30px; }
             .status { display: inline-block; padding: 8px 20px; border-radius: 30px; background: #4CAF50; color: white; font-weight: bold; margin-bottom: 20px; }
@@ -741,12 +736,16 @@ def home():
             .footer { text-align: center; color: #999; margin-top: 30px; font-size: 12px; }
             .commands { display: flex; gap: 10px; flex-wrap: wrap; margin: 15px 0; }
             .commands code { background: #f0f0f0; padding: 8px 15px; border-radius: 8px; font-size: 14px; color: #333; }
+            .bot-status { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+            .bot-running { background: #4CAF50; color: white; }
+            .bot-stopped { background: #f44336; color: white; }
+            .bot-pending { background: #FF9800; color: white; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🚀 Multi-Tenant Shop Bot</h1>
-            <p class="subtitle">Advanced Store Management System</p>
+            <h1>🚀 Ultimate Control Bot</h1>
+            <p class="subtitle">Manage 1000+ Shop Bots</p>
             <div class="status">🟢 Online</div>
             
             <div class="stats" id="stats">
@@ -759,12 +758,12 @@ def home():
                     <div class="stat-label">Active Stores</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-number" id="pending-stores">-</div>
-                    <div class="stat-label">Pending Approval</div>
+                    <div class="stat-number" id="running-bots">-</div>
+                    <div class="stat-label">Running Bots</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-number" id="total-products">-</div>
-                    <div class="stat-label">Total Products</div>
+                    <div class="stat-number" id="pending-stores">-</div>
+                    <div class="stat-label">Pending Approval</div>
                 </div>
                 <div class="stat-item">
                     <div class="stat-number" id="total-orders">-</div>
@@ -784,6 +783,7 @@ def home():
                     <code>/superadmin</code>
                     <code>/panel</code>
                     <code>/analytics</code>
+                    <code>/bots</code>
                 </div>
             </div>
             
@@ -792,10 +792,11 @@ def home():
                 <p>🔍 Natural Language Search</p>
                 <p>📸 AI-Powered Payment Verification</p>
                 <p>💬 Smart Chat Assistant</p>
+                <p>📊 Bot Performance Monitoring</p>
             </div>
             
             <div class="footer">
-                © 2026 Multi-Tenant Shop Bot v5.0 | Powered by Gemini AI
+                © 2026 Ultimate Control Bot v6.0 | Powered by Gemini AI | Supports 1000+ Bots
             </div>
         </div>
         
@@ -806,8 +807,8 @@ def home():
                     const data = await response.json();
                     document.getElementById('total-stores').textContent = data.total_stores || 0;
                     document.getElementById('active-stores').textContent = data.active_stores || 0;
+                    document.getElementById('running-bots').textContent = data.running_bots || 0;
                     document.getElementById('pending-stores').textContent = data.pending_approval || 0;
-                    document.getElementById('total-products').textContent = data.total_products || 0;
                     document.getElementById('total-orders').textContent = data.total_orders || 0;
                     document.getElementById('total-revenue').textContent = data.total_revenue ? data.total_revenue.toFixed(2) + ' ETB' : '0 ETB';
                 } catch(e) {
@@ -823,12 +824,11 @@ def home():
 
 @app.route('/api/stats')
 def api_stats():
-    """Get system statistics"""
     try:
         total_stores = db_execute("SELECT COUNT(*) FROM stores", fetch=True)[0][0]
         pending = db_execute("SELECT COUNT(*) FROM stores WHERE is_approved = 0", fetch=True)[0][0]
         active = db_execute("SELECT COUNT(*) FROM stores WHERE is_active = 1 AND is_approved = 1", fetch=True)[0][0]
-        total_products = db_execute("SELECT COUNT(*) FROM products", fetch=True)[0][0]
+        running = db_execute("SELECT COUNT(*) FROM stores WHERE bot_status = 'running'", fetch=True)[0][0]
         total_orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0][0]
         revenue = db_execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1", fetch=True)[0][0]
         
@@ -836,60 +836,285 @@ def api_stats():
             "total_stores": total_stores,
             "pending_approval": pending,
             "active_stores": active,
-            "total_products": total_products,
+            "running_bots": running,
             "total_orders": total_orders,
             "total_revenue": float(revenue)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/bots')
+def api_bots():
+    try:
+        bots = db_execute_dict("""
+            SELECT id, store_name, username, is_active, is_approved, bot_status, 
+                   total_orders, total_sales, created_at
+            FROM stores ORDER BY created_at DESC LIMIT 100
+        """)
+        return jsonify([dict(b) for b in bots])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/bot/<token>')
+def api_bot_detail(token):
+    try:
+        bot = get_store_info(token)
+        if not bot:
+            return jsonify({"error": "Bot not found"}), 404
+        
+        metrics = {
+            "orders": get_bot_metrics(token, "orders"),
+            "revenue": get_bot_metrics(token, "revenue"),
+            "customers": get_bot_metrics(token, "customers"),
+            "uptime": get_bot_metrics(token, "uptime")
+        }
+        
+        return jsonify({
+            "bot": bot,
+            "metrics": metrics
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/health')
 def api_health():
-    """Health check endpoint"""
     try:
         db_execute("SELECT 1", fetch=True)
         return jsonify({
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "ai_available": AIEngine.is_available()
+            "ai_available": AIEngine.is_available(),
+            "total_bots": len(running_tokens) if 'running_tokens' in globals() else 0
         })
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 def run_flask():
-    app.run(host=Config.HOST, port=Config.PORT, debug=False)
+    app.run(host=Config.HOST, port=Config.PORT, debug=False, threaded=True)
 
 threading.Thread(target=run_flask, daemon=True).start()
 logger.info(f"✅ Web server running on {Config.HOST}:{Config.PORT}")
 
 # =================================================================================================
-#                           SHOP BOT ENGINE - Multi-Tenant
+#                           BOT MANAGER - 1000+ Bots
 # =================================================================================================
 
 running_tokens = set()
 running_lock = threading.Lock()
-user_carts = {}
-user_carts_lock = threading.Lock()
+bot_threads = {}
+bot_threads_lock = threading.Lock()
+bot_restart_tracker = defaultdict(int)
+bot_restart_lock = threading.Lock()
 
-def start_shop_bot(token: str) -> bool:
-    """Start a shop bot for a store"""
-    with running_lock:
-        if token in running_tokens:
-            return False
-        running_tokens.add(token)
+class BotManager:
+    """ማዕከላዊ የቦት አስተዳደር ክፍል - 1000+ ቦቶችን ይደግፋል"""
     
-    try:
-        setup_bot_handlers(token)
-        logger.info(f"✅ Shop bot started: {token[:15]}...")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to start bot {token[:15]}: {e}")
+    _instance = None
+    _lock = threading.Lock()
+    _executor = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialize()
+        return cls._instance
+    
+    def _initialize(self):
+        """Bot Manager ን መጀመር"""
+        self._executor = ThreadPoolExecutor(max_workers=Config.DATABASE_POOL_MAX * 2)
+        self._health_check_thread = None
+        self._running = True
+        self._start_health_check()
+        logger.info("✅ Bot Manager initialized (supports 1000+ bots)")
+    
+    def _start_health_check(self):
+        """የቦት ጤና ቼክ መጀመር"""
+        def health_check_loop():
+            while self._running:
+                try:
+                    self._check_all_bots()
+                    time.sleep(Config.BOT_HEALTH_CHECK_INTERVAL)
+                except Exception as e:
+                    logger.error(f"Health check error: {e}")
+                    time.sleep(10)
+        
+        self._health_check_thread = threading.Thread(target=health_check_loop, daemon=True)
+        self._health_check_thread.start()
+    
+    def _check_all_bots(self):
+        """ሁሉንም ቦቶች ማረጋገጥ"""
+        try:
+            # Get all active bots
+            bots = db_execute_dict("""
+                SELECT token, store_name, bot_status, is_active, is_approved
+                FROM stores 
+                WHERE is_approved = 1
+            """)
+            
+            current_running = set(running_tokens)
+            should_run = set()
+            
+            for bot in bots:
+                if bot['is_active'] == 1 and bot['is_approved'] == 1:
+                    should_run.add(bot['token'])
+            
+            # Start bots that should be running but aren't
+            to_start = should_run - current_running
+            for token in to_start:
+                logger.info(f"🔄 Auto-restarting bot: {token[:15]}...")
+                self.start_bot(token)
+            
+            # Stop bots that shouldn't be running
+            to_stop = current_running - should_run
+            for token in to_stop:
+                logger.info(f"🛑 Stopping bot: {token[:15]}...")
+                self.stop_bot(token)
+            
+            # Update status for all bots
+            for bot in bots:
+                status = 'running' if bot['token'] in running_tokens else 'stopped'
+                if bot['bot_status'] != status:
+                    update_bot_status(bot['token'], status)
+                    
+        except Exception as e:
+            logger.error(f"Health check error: {e}")
+    
+    def start_bot(self, token: str) -> bool:
+        """አንድ ቦት ማስነሳት"""
         with running_lock:
+            if token in running_tokens:
+                return True
+        
+        try:
+            # Check if bot is approved and active
+            store = get_store_info(token)
+            if not store or store.get('is_approved', 0) != 1 or store.get('is_active', 1) != 1:
+                logger.warning(f"Cannot start bot {token[:15]}: not approved or inactive")
+                return False
+            
+            # Check restart limit
+            with bot_restart_lock:
+                if bot_restart_tracker[token] >= Config.MAX_BOT_RESTARTS:
+                    logger.warning(f"Bot {token[:15]} has exceeded max restarts")
+                    return False
+            
+            # Start the bot
+            success = self._start_bot_thread(token)
+            
+            if success:
+                with running_lock:
+                    running_tokens.add(token)
+                update_bot_status(token, 'running')
+                with bot_restart_lock:
+                    bot_restart_tracker[token] = 0
+                logger.info(f"✅ Bot started: {token[:15]}...")
+                return True
+            else:
+                with bot_restart_lock:
+                    bot_restart_tracker[token] += 1
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to start bot {token[:15]}: {e}")
+            return False
+    
+    def _start_bot_thread(self, token: str) -> bool:
+        """ቦት በተለየ ስርዓተ ክር ማስነሳት"""
+        try:
+            with bot_threads_lock:
+                if token in bot_threads:
+                    return True
+                
+                def run_bot():
+                    try:
+                        setup_bot_handlers(token)
+                    except Exception as e:
+                        logger.error(f"Bot {token[:15]} crashed: {e}")
+                        # Auto-restart
+                        time.sleep(Config.BOT_RESTART_DELAY)
+                        self.start_bot(token)
+                
+                thread = threading.Thread(target=run_bot, daemon=True, name=f"Bot_{token[:10]}")
+                thread.start()
+                bot_threads[token] = thread
+                return True
+        except Exception as e:
+            logger.error(f"Thread start error: {e}")
+            return False
+    
+    def stop_bot(self, token: str) -> bool:
+        """አንድ ቦት ማቆም"""
+        with running_lock:
+            if token not in running_tokens:
+                return True
+            
             running_tokens.discard(token)
-        return False
+            update_bot_status(token, 'stopped')
+            
+            with bot_threads_lock:
+                if token in bot_threads:
+                    # Thread will exit on its own
+                    del bot_threads[token]
+            
+            logger.info(f"🛑 Bot stopped: {token[:15]}...")
+            return True
+    
+    def restart_bot(self, token: str) -> bool:
+        """አንድ ቦት እንደገና ማስነሳት"""
+        self.stop_bot(token)
+        time.sleep(1)
+        return self.start_bot(token)
+    
+    def get_all_bots(self) -> List[Dict]:
+        """ሁሉንም ቦቶች ማግኘት"""
+        try:
+            return db_execute_dict("""
+                SELECT id, store_name, username, is_active, is_approved, 
+                       bot_status, total_orders, total_sales, created_at
+                FROM stores
+                ORDER BY created_at DESC
+                LIMIT 1000
+            """)
+        except Exception as e:
+            logger.error(f"Get all bots error: {e}")
+            return []
+    
+    def get_bot_stats(self) -> Dict:
+        """የቦት ስታቲስቲክስ ማግኘት"""
+        try:
+            total = db_execute("SELECT COUNT(*) FROM stores", fetch=True)[0][0]
+            running = db_execute("SELECT COUNT(*) FROM stores WHERE bot_status = 'running'", fetch=True)[0][0]
+            stopped = db_execute("SELECT COUNT(*) FROM stores WHERE bot_status = 'stopped'", fetch=True)[0][0]
+            pending = db_execute("SELECT COUNT(*) FROM stores WHERE is_approved = 0", fetch=True)[0][0]
+            
+            return {
+                "total": total,
+                "running": running,
+                "stopped": stopped,
+                "pending": pending
+            }
+        except Exception as e:
+            logger.error(f"Get bot stats error: {e}")
+            return {"total": 0, "running": 0, "stopped": 0, "pending": 0}
+    
+    def shutdown(self):
+        """Bot Manager ን መዝጋት"""
+        self._running = False
+        if self._executor:
+            self._executor.shutdown(wait=False)
+        logger.info("🛑 Bot Manager shutting down")
+
+# Initialize Bot Manager
+bot_manager = BotManager()
+
+# =================================================================================================
+#                           SHOP BOT ENGINE
+# =================================================================================================
 
 def setup_bot_handlers(token: str):
-    """Setup bot handlers for a store"""
+    """የሱቅ ቦት ሃንድለሮች ማዘጋጀት"""
     bot = telebot.TeleBot(token, threaded=False)
     
     try:
@@ -897,41 +1122,23 @@ def setup_bot_handlers(token: str):
     except:
         pass
     
-    # ============================================================
-    # COMMAND: /start
-    # ============================================================
     @bot.message_handler(commands=['start'])
     def handle_start(message):
         chat_id = message.chat.id
         store = get_store_info(token)
         
         if not store:
-            bot.send_message(
-                chat_id,
-                "🏪 ይህ ቦት ገና አልተመዘገበም።\n\n"
-                "📌 እባክዎ በ Control Bot ይመዝገቡ!",
-                parse_mode="Markdown"
-            )
+            bot.send_message(chat_id, "🏪 ይህ ቦት ገና አልተመዘገበም።")
             return
         
         if store.get('is_approved', 0) != 1:
-            bot.send_message(
-                chat_id,
-                f"⏳ **ሰላም!**\n\n"
-                f"ይህ ሱቅ **{store.get('store_name', '')}** ገና አልጸደቀም።\n"
-                f"እባክዎ ለማጽደቅ ይጠብቁ።",
-                parse_mode="Markdown"
-            )
+            bot.send_message(chat_id, f"⏳ ሱቅ **{store.get('store_name', '')}** ገና አልጸደቀም።")
             return
         
         if not store.get('is_active', 1):
-            bot.send_message(
-                chat_id,
-                "❌ ይህ ሱቅ ንቁ አይደለም።\nእባክዎ አድሚኑን ያነጋግሩ።"
-            )
+            bot.send_message(chat_id, "❌ ይህ ሱቅ ንቁ አይደለም።")
             return
         
-        # Language selection
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data=f"lang_am_{token}"),
@@ -940,15 +1147,11 @@ def setup_bot_handlers(token: str):
         
         bot.send_message(
             chat_id,
-            f"🌐 **{store.get('store_name', '')}**\n\n"
-            "ቋንቋ ይምረጡ / Select Language:",
+            f"🌐 **{store.get('store_name', '')}**\n\nቋንቋ ይምረጡ:",
             reply_markup=markup,
             parse_mode="Markdown"
         )
     
-    # ============================================================
-    # LANGUAGE SELECTION
-    # ============================================================
     @bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
     def handle_lang(call):
         _, lang, bot_token = call.data.split("_")
@@ -960,7 +1163,6 @@ def setup_bot_handlers(token: str):
         
         bot.delete_message(chat_id, call.message.message_id)
         
-        # Main menu
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         markup.add(
             types.KeyboardButton("🛍️ ምርቶች"),
@@ -975,20 +1177,8 @@ def setup_bot_handlers(token: str):
             types.KeyboardButton("❓ እርዳታ")
         )
         
-        welcome = {
-            "am": "እንኳን ወደ ሱቅ በደህና መጡ! 👋",
-            "en": "Welcome to the store! 👋"
-        }
-        
-        bot.send_message(
-            chat_id,
-            welcome.get(lang, welcome["am"]),
-            reply_markup=markup
-        )
+        bot.send_message(chat_id, "እንኳን ወደ ሱቅ በደህና መጡ! 👋", reply_markup=markup)
     
-    # ============================================================
-    # SHOP PRODUCTS
-    # ============================================================
     @bot.message_handler(func=lambda m: m.text == "🛍️ ምርቶች")
     def handle_products(message):
         chat_id = message.chat.id
@@ -999,11 +1189,10 @@ def setup_bot_handlers(token: str):
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, name_am, name_en, price, stock, image_url, desc_am, desc_en
+                    SELECT id, name_am, name_en, price, stock, image_url
                     FROM products
                     WHERE token = %s AND stock > 0 AND is_active = 1
-                    ORDER BY id
-                    LIMIT 20
+                    ORDER BY id LIMIT 20
                 """, (token,))
                 products = cur.fetchall()
         finally:
@@ -1011,31 +1200,18 @@ def setup_bot_handlers(token: str):
                 put_db_connection(conn)
         
         if not products:
-            bot.send_message(
-                chat_id,
-                "🛍️ ምንም ምርት የለም" if lang == "am" else "No products available",
-                reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add(
-                    types.KeyboardButton("🔙 ወደ ኋላ")
-                )
-            )
+            bot.send_message(chat_id, "🛍️ ምንም ምርት የለም")
             return
         
         for product in products:
-            p_id, name_am, name_en, price, stock, image_url, desc_am, desc_en = product
+            p_id, name_am, name_en, price, stock, image_url = product
             name = name_am if lang == "am" else name_en
-            desc = desc_am if lang == "am" else desc_en
             
-            text = f"📦 **{name}**\n"
-            text += f"💰 {format_currency(price)}\n"
-            text += f"📌 ✅ {lang == 'am' and 'ይገኛል' or 'In Stock'}\n"
-            if desc:
-                text += f"📝 {desc[:100]}..."
+            text = f"📦 **{name}**\n💰 {format_currency(price)}\n📌 ✅ ይገኛል"
             
             markup = types.InlineKeyboardMarkup()
-            markup.add(
-                types.InlineKeyboardButton("🛒 ወደ ጋሪ ጨምር", callback_data=f"add_{p_id}"),
-                types.InlineKeyboardButton("📖 ዝርዝር", callback_data=f"detail_{p_id}")
-            )
+            if stock > 0:
+                markup.add(types.InlineKeyboardButton("🛒 ወደ ጋሪ ጨምር", callback_data=f"add_{p_id}"))
             
             if image_url:
                 try:
@@ -1044,472 +1220,1347 @@ def setup_bot_handlers(token: str):
                     bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
             else:
                 bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-        
-        # Back button
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add(types.KeyboardButton("🔙 ወደ ኋላ"))
-        bot.send_message(chat_id, "📌 ሌሎች ምርቶችን ለማየት እንደገና ይጫኑ", reply_markup=markup)
     
-    # ============================================================
-    # PRODUCT DETAIL
-    # ============================================================
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("detail_"))
-    def handle_product_detail(call):
-        p_id = int(call.data.split("_")[1])
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = None
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT name_am, name_en, price, stock, desc_am, desc_en, image_url
-                    FROM products WHERE id = %s AND token = %s
-                """, (p_id, token))
-                product = cur.fetchone()
-        finally:
-            if conn:
-                put_db_connection(conn)
-        
-        if not product:
-            bot.answer_callback_query(call.id, "❌ ምርት አልተገኘም")
-            return
-        
-        name_am, name_en, price, stock, desc_am, desc_en, image_url = product
-        name = name_am if lang == "am" else name_en
-        desc = desc_am if lang == "am" else desc_en
-        
-        text = f"📦 **{name}**\n\n"
-        text += f"💰 {format_currency(price)}\n"
-        text += f"📦 {stock} {lang == 'am' and 'ቁራጭ' or 'units'} {lang == 'am' and 'ቀርቷል' or 'available'}\n"
-        if desc:
-            text += f"\n📝 {desc}\n"
-        
-        markup = types.InlineKeyboardMarkup()
-        if stock > 0:
-            markup.add(types.InlineKeyboardButton("🛒 ወደ ጋሪ ጨምር", callback_data=f"add_{p_id}"))
-        markup.add(types.InlineKeyboardButton("🔙 ወደ ኋላ", callback_data="back_to_products"))
-        
-        if image_url:
-            try:
-                bot.send_photo(chat_id, image_url, caption=text, reply_markup=markup, parse_mode="Markdown")
-            except:
-                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-        else:
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-        
-        bot.answer_callback_query(call.id)
-    
-    # ============================================================
-    # ADD TO CART
-    # ============================================================
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("add_"))
-    def handle_add_to_cart(call):
-        p_id = int(call.data.split("_")[1])
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        # Check stock
-        conn = None
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute("SELECT stock FROM products WHERE id = %s AND token = %s", (p_id, token))
-                result = cur.fetchone()
-        finally:
-            if conn:
-                put_db_connection(conn)
-        
-        if not result or result[0] <= 0:
-            bot.answer_callback_query(call.id, "❌ ምርቱ አልቀረም!")
-            return
-        
-        # Add to cart
-        with user_carts_lock:
-            cart_key = (token, chat_id)
-            if cart_key not in user_carts:
-                user_carts[cart_key] = {}
-            user_carts[cart_key][p_id] = user_carts[cart_key].get(p_id, 0) + 1
-        
-        bot.answer_callback_query(
-            call.id,
-            "✅ ወደ ጋሪ ተጨምሯል!" if lang == "am" else "✅ Added to cart!"
-        )
-    
-    # ============================================================
-    # VIEW CART
-    # ============================================================
     @bot.message_handler(func=lambda m: m.text == "🛒 ጋሪ")
     def handle_cart(message):
         chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        with user_carts_lock:
-            cart = user_carts.get((token, chat_id), {})
-        
-        if not cart:
-            bot.send_message(
-                chat_id,
-                "🛒 ጋሪዎ ባዶ ነው" if lang == "am" else "🛒 Your cart is empty"
-            )
-            return
-        
-        total = 0
-        text = "🛒 **ጋሪ**\n\n"
-        
-        conn = None
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                for p_id, qty in cart.items():
-                    cur.execute("SELECT name_am, name_en, price FROM products WHERE id = %s AND token = %s", (p_id, token))
-                    product = cur.fetchone()
-                    if product:
-                        name = product[0] if lang == "am" else product[1]
-                        price = product[2]
-                        subtotal = price * qty
-                        total += subtotal
-                        text += f"▪️ {name} x{qty} = {format_currency(subtotal)}\n"
-        finally:
-            if conn:
-                put_db_connection(conn)
-        
-        text += f"\n💰 **{lang == 'am' and 'አጠቃላይ' or 'Total'}: {format_currency(total)}**"
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("💳 ሂሳብ ማጠቃለያ", callback_data="checkout"),
-            types.InlineKeyboardButton("🗑️ ጋሪ አጽዳ", callback_data="clear_cart")
-        )
-        
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(chat_id, "🛒 ጋሪዎ ባዶ ነው")
     
-    # ============================================================
-    # CLEAR CART
-    # ============================================================
-    @bot.callback_query_handler(func=lambda call: call.data == "clear_cart")
-    def handle_clear_cart(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        with user_carts_lock:
-            user_carts.pop((token, chat_id), None)
-        
-        bot.edit_message_text(
-            "🗑️ ጋሪ ጸድቷል" if lang == "am" else "🗑️ Cart cleared",
-            chat_id,
-            call.message.message_id
-        )
-        bot.answer_callback_query(call.id)
-    
-    # ============================================================
-    # CHECKOUT
-    # ============================================================
-    @bot.callback_query_handler(func=lambda call: call.data == "checkout")
-    def handle_checkout(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        with user_carts_lock:
-            cart = user_carts.get((token, chat_id), {})
-        
-        if not cart:
-            bot.answer_callback_query(call.id, "❌ ጋሪ ባዶ ነው!")
-            return
-        
-        # Get customer info
-        customer = get_customer_info(chat_id)
-        has_phone = customer and customer.get('phone')
-        has_location = customer and customer.get('lat') and customer.get('lng')
-        
-        if not has_phone or not has_location:
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            if not has_phone:
-                markup.add(types.KeyboardButton("📱 ስልክ አጋራ", request_contact=True))
-            if not has_location:
-                markup.add(types.KeyboardButton("📍 አካባቢ አጋራ", request_location=True))
-            
-            bot.send_message(
-                chat_id,
-                "🚚 ለማድረሻ ስልክ እና አካባቢ ያጋሩ 👇",
-                reply_markup=markup
-            )
-            bot.answer_callback_query(call.id)
-            return
-        
-        # Process checkout
-        process_checkout(call)
-    
-    # ============================================================
-    # PROCESS CHECKOUT
-    # ============================================================
-    def process_checkout(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        with user_carts_lock:
-            cart = user_carts.get((token, chat_id), {})
-        
-        if not cart:
-            bot.answer_callback_query(call.id, "❌ ጋሪ ባዶ ነው!")
-            return
-        
-        store = get_store_info(token)
-        customer = get_customer_info(chat_id)
-        
-        if not store or not customer:
-            bot.send_message(chat_id, "❌ መረጃ አልተገኘም")
-            return
-        
-        # Calculate totals
-        total_items = 0
-        order_items = []
-        conn = None
-        
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                for p_id, qty in cart.items():
-                    cur.execute("SELECT price, stock FROM products WHERE id = %s AND token = %s", (p_id, token))
-                    product = cur.fetchone()
-                    if product:
-                        price, stock = product
-                        buy_qty = min(qty, stock)
-                        if buy_qty > 0:
-                            total_items += price * buy_qty
-                            order_items.append((p_id, buy_qty, price))
-                
-                # Calculate delivery fee
-                delivery_fee = 0
-                if store.get('shop_lat') and store.get('shop_lng'):
-                    dist = calculate_distance(
-                        store['shop_lat'], store['shop_lng'],
-                        customer.get('lat', 0), customer.get('lng', 0)
-                    )
-                    delivery_fee = calculate_delivery_fee(dist)
-                
-                grand_total = total_items + delivery_fee
-                
-                # Create order
-                cur.execute("""
-                    INSERT INTO orders (
-                        token, customer_id, customer_phone,
-                        status_am, status_en, status_stage,
-                        total_price, delivery_fee,
-                        delivery_address, delivery_lat, delivery_lng
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    token, chat_id, customer.get('phone'),
-                    "🟡 በመጠባበቅ ላይ", "🟡 Pending", 0,
-                    total_items, delivery_fee,
-                    customer.get('address', ''),
-                    customer.get('lat', 0),
-                    customer.get('lng', 0)
-                ))
-                order_id = cur.fetchone()[0]
-                
-                # Add order items
-                for p_id, qty, price in order_items:
-                    cur.execute("""
-                        INSERT INTO order_items (order_id, product_id, qty, price, total)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (order_id, p_id, qty, price, price * qty))
-                    
-                    # Update stock
-                    cur.execute(
-                        "UPDATE products SET stock = stock - %s, sales_count = sales_count + %s WHERE id = %s",
-                        (qty, qty, p_id)
-                    )
-                
-                conn.commit()
-                
-                # Clear cart
-                with user_carts_lock:
-                    user_carts.pop((token, chat_id), None)
-                
-                # Show payment info
-                pay_methods = ""
-                if store.get('telebirr'):
-                    pay_methods += f"📱 ቴሌብር: `{store['telebirr']}`\n"
-                if store.get('cbebirr'):
-                    pay_methods += f"🏦 CBE ብር: `{store['cbebirr']}`\n"
-                if store.get('bank_name') and store.get('bank_account'):
-                    pay_methods += f"🏛️ {store['bank_name']}: `{store['bank_account']}`\n"
-                
-                pay_text = f"""
-🆔 **Order ID:** `{order_id}`
-
-💵 ድምር: {format_currency(total_items)}
-🚚 ማድረሻ: {format_currency(delivery_fee)}
-💰 **አጠቃላይ: {format_currency(grand_total)}**
-
-**የክፍያ መንገዶች:**
-{pay_methods}
-
-📸 እባክዎ የክፍያ ማረጋገጫ ፎቶ ይላኩ
-"""
-                
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("✅ ክፍያ አረጋግጫለሁ", callback_data=f"pay_confirmed_{order_id}"))
-                
-                bot.send_message(
-                    chat_id,
-                    pay_text,
-                    reply_markup=markup,
-                    parse_mode="Markdown"
-                )
-                
-                # Notify admin
-                admin_id = store.get('admin_id')
-                if admin_id:
-                    try:
-                        bot.send_message(
-                            admin_id,
-                            f"🔔 **አዲስ ትዕዛዝ #{order_id}!**\n"
-                            f"👤 ደንበኛ: {chat_id}\n"
-                            f"💰 {format_currency(grand_total)}"
-                        )
-                    except:
-                        pass
-                
-        except Exception as e:
-            logger.error(f"Checkout error: {e}")
-            if conn:
-                try:
-                    conn.rollback()
-                except:
-                    pass
-            bot.send_message(chat_id, f"❌ ስህተት ተከስቷል: {e}")
-        finally:
-            if conn:
-                put_db_connection(conn)
-    
-    # ============================================================
-    # PAYMENT RECEIPT VERIFICATION (AI-Powered)
-    # ============================================================
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("pay_confirmed_"))
-    def handle_pay_confirmed(call):
-        order_id = int(call.data.split("_")[2])
-        chat_id = call.message.chat.id
-        
-        bot.send_message(
-            chat_id,
-            "📸 እባክዎ የክፍያ ማረጋገጫ ፎቶዎን ይላኩ\n\n"
-            "🤖 ምስሉ በ AI ይረጋገጣል"
-        )
-        bot.answer_callback_query(call.id)
-    
-    @bot.message_handler(content_types=['photo'])
-    def handle_payment_receipt(message):
-        """AI-Powered payment receipt verification"""
+    @bot.message_handler(func=lambda m: m.text == "🔍 ፍለጋ")
+    def handle_search(message):
         chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
+        msg = bot.send_message(chat_id, "🔍 የምርት ስም ያስገቡ:")
+        bot.register_next_step_handler(msg, lambda m: process_search(m, token, bot))
+    
+    def process_search(message, token, bot):
+        query = message.text.strip()
+        chat_id = message.chat.id
         
-        # Get pending order for this customer
+        if not query:
+            bot.send_message(chat_id, "❌ እባክዎ ፍለጋ ቃል ያስገቡ")
+            return
+        
         conn = None
         try:
             conn = get_db_connection()
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, total_price + delivery_fee as total
-                    FROM orders
-                    WHERE customer_id = %s AND token = %s AND status_stage = 0
-                    ORDER BY id DESC LIMIT 1
-                """, (chat_id, token))
-                order = cur.fetchone()
+                    SELECT id, name_am, name_en, price, stock, image_url
+                    FROM products
+                    WHERE token = %s AND is_active = 1 AND stock > 0
+                    AND (name_am ILIKE %s OR name_en ILIKE %s)
+                    LIMIT 10
+                """, (token, f"%{query}%", f"%{query}%"))
+                products = cur.fetchall()
         finally:
             if conn:
                 put_db_connection(conn)
         
-        if not order:
-            bot.send_message(
-                chat_id,
-                "❌ ምንም ያልተከፈለ ትዕዛዝ አልተገኘም"
-            )
+        if not products:
+            bot.send_message(chat_id, f"🔍 '{query}' አልተገኘም")
             return
         
-        order_id, total = order
-        
-        # Download photo
+        for p in products:
+            name = p.get('name_am', '')
+            price = p.get('price', 0)
+            image_url = p.get('image_url')
+            
+            text = f"📦 **{name}**\n💰 {format_currency(price)}"
+            
+            markup = types.InlineKeyboardMarkup()
+            if p.get('stock', 0) > 0:
+                markup.add(types.InlineKeyboardButton("🛒 ወደ ጋሪ ጨምር", callback_data=f"add_{p['id']}"))
+            
+            if image_url:
+                try:
+                    bot.send_photo(chat_id, image_url, caption=text, reply_markup=markup, parse_mode="Markdown")
+                except:
+                    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+            else:
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    
+    @bot.message_handler(func=lambda m: m.text == "📦 ትዕዛዝ")
+    def handle_track(message):
+        chat_id = message.chat.id
+        msg = bot.send_message(chat_id, "🔢 የትዕዛዝ ቁጥር ያስገቡ:")
+        bot.register_next_step_handler(msg, lambda m: process_track(m, token, bot))
+    
+    def process_track(message, token, bot):
         try:
-            file_info = bot.get_file(message.photo[-1].file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-        except Exception as e:
-            logger.error(f"Failed to download photo: {e}")
-            bot.send_message(chat_id, "❌ ፎቶ ማውረድ አልተቻለም")
-            return
-        
-        # Send verification in progress
-        bot.send_message(
-            chat_id,
-            "🔄 **ክፍያዎ በ AI እየተረጋገጠ ነው...**\n\n"
-            "🤖 የ Gemini AI ምስል ትንተና እያደረገ ነው\n"
-            "⏳ እባክዎ ለ30 ሰከንድ ያህል ይጠብቁ",
-            parse_mode="Markdown"
-        )
-        
-        # Verify receipt using AI
-        is_valid, details = AIEngine.verify_payment_receipt(
-            downloaded_file,
-            float(total)
-        )
-        
-        if is_valid:
-            # Update order status
+            order_id = int(message.text.strip())
+            chat_id = message.chat.id
+            
+            conn = None
             try:
                 conn = get_db_connection()
                 with conn.cursor() as cur:
                     cur.execute("""
-                        UPDATE orders 
-                        SET status_am = '✅ ተረጋግጧል',
-                            status_en = '✅ Confirmed',
-                            status_stage = 1,
-                            payment_status = 'paid',
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                    """, (order_id,))
-                    conn.commit()
+                        SELECT status_am, total_price, created_at
+                        FROM orders
+                        WHERE id = %s AND token = %s
+                    """, (order_id, token))
+                    order = cur.fetchone()
             finally:
                 if conn:
                     put_db_connection(conn)
             
-            # Send success message
-            bot.send_message(
-                chat_id,
-                f"""✅ **ክፍያዎ በትክክል ተረጋግጧል!**
+            if not order:
+                bot.send_message(chat_id, "❌ ትዕዛዝ አልተገኘም")
+                return
+            
+            status, price, created = order
+            text = f"📦 **ትዕዛዝ #{order_id}**\n"
+            text += f"📌 ሁኔታ: {status}\n"
+            text += f"💵 ድምር: {format_currency(price)}\n"
+            text += f"📅 ቀን: {format_date(created)}"
+            
+            bot.send_message(chat_id, text, parse_mode="Markdown")
+        except ValueError:
+            bot.send_message(message.chat.id, "❌ የተሳሳተ ቁጥር!")
+    
+    @bot.message_handler(func=lambda m: m.text == "📍 መረጃ")
+    def handle_info(message):
+        chat_id = message.chat.id
+        store = get_store_info(token)
+        
+        if not store:
+            return
+        
+        text = f"🏪 **{store.get('store_name', '')}**\n\n"
+        if store.get('shop_description'):
+            text += f"📝 {store['shop_description']}\n\n"
+        if store.get('area_text'):
+            text += f"📍 {store['area_text']}\n"
+        if store.get('username'):
+            text += f"👤 @{store['username']}\n"
+        text += f"⭐ {store.get('rating', 0)}/5.0"
+        
+        bot.send_message(chat_id, text, parse_mode="Markdown")
+    
+    @bot.message_handler(func=lambda m: m.text == "❓ እርዳታ")
+    def handle_help(message):
+        text = """
+❓ **እርዳታ**
 
-🎉 ትዕዛዝ #{order_id} ተመዝግቧል
-📦 ምርቶችዎ እየተዘጋጁ ነው
+🛍️ ምርቶች - የሱቁን ምርቶች ይመልከቱ
+🛒 ጋሪ - የእርስዎን ጋሪ ይመልከቱ
+🔍 ፍለጋ - ምርቶችን ይፈልጉ
+📦 ትዕዛዝ - ትዕዛዝዎን ይከታተሉ
+📍 መረጃ - ስለ ሱቁ መረጃ
 
-📊 ዝርዝር ለማየት /track {order_id} ይላኩ
-""",
-                parse_mode="Markdown"
+📞 ለተጨማሪ እርዳታ አስተዳዳሪውን ያነጋግሩ
+"""
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    
+    @bot.message_handler(func=lambda m: m.text == "🔙 ወደ ኋላ")
+    def handle_back(message):
+        chat_id = message.chat.id
+        lang = get_user_lang(chat_id)
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(
+            types.KeyboardButton("🛍️ ምርቶች"),
+            types.KeyboardButton("🛒 ጋሪ")
+        )
+        markup.add(
+            types.KeyboardButton("🔍 ፍለጋ"),
+            types.KeyboardButton("📦 ትዕዛዝ")
+        )
+        markup.add(
+            types.KeyboardButton("📍 መረጃ"),
+            types.KeyboardButton("❓ እርዳታ")
+        )
+        
+        bot.send_message(chat_id, "🔙 ወደ ዋና ሜኑ", reply_markup=markup)
+    
+    @bot.message_handler(func=lambda m: True)
+    def handle_ai(message):
+        if not AIEngine.is_available():
+            return
+        
+        chat_id = message.chat.id
+        store = get_store_info(token)
+        
+        if not store:
+            return
+        
+        bot.send_chat_action(chat_id, 'typing')
+        context = f"You are an AI assistant for '{store.get('store_name', '')}' store. Respond in Amharic or English."
+        response = AIEngine.generate_response(message.text, context)
+        
+        if response:
+            bot.reply_to(message, response[:1000])
+    
+    def _run_bot():
+        while True:
+            try:
+                bot.infinity_polling(skip_pending=True, timeout=30)
+            except Exception as e:
+                logger.error(f"Bot {token[:15]} polling error: {e}")
+                time.sleep(Config.BOT_RESTART_DELAY)
+    
+    threading.Thread(target=_run_bot, daemon=True).start()
+
+# =================================================================================================
+#                           CONTROL BOT - Super Admin
+# =================================================================================================
+
+class ControlBot:
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialize()
+        return cls._instance
+    
+    def _initialize(self):
+        self.bot = telebot.TeleBot(Config.CONTROL_BOT_TOKEN, threaded=False)
+        self.sessions = {}
+        self.login_attempts = {}
+        self.reg_states = {}
+        
+        self.sessions_lock = threading.Lock()
+        self.login_lock = threading.Lock()
+        self.reg_lock = threading.Lock()
+        
+        try:
+            self.bot.remove_webhook()
+        except:
+            pass
+        
+        self._register_handlers()
+        self._start_polling()
+        logger.info("✅ Control Bot initialized")
+    
+    def _register_handlers(self):
+        
+        @self.bot.message_handler(commands=['start', 'help'])
+        def cmd_start(message):
+            chat_id = message.chat.id
+            
+            text = """
+👋 **እንኳን ወደ Ultimate Control Bot በደህና መጡ!**
+
+📌 **አዲስ ሱቅ ለመመዝገብ:**
+1️⃣ @BotFather ላይ `/newbot` በማድረግ ቦት ይፍጠሩ
+2️⃣ Token ከተቀበሉ '📝 አዲስ ሱቅ መዝግብ' ይጫኑ
+3️⃣ 5 ደረጃዎችን ይሙሉ
+
+📌 **ሱቆችዎን ለማየት:** 🏪 ሱቆቼ
+📌 **ሁሉንም ሱቆች ለማየት:** `/bots`
+
+👑 **Super Admin ከሆኑ:** `/superadmin`
+
+🤖 **AI Features:**
+- 🔍 Natural Language Search
+- 📸 AI-Powered Payment Verification
+- 💬 Smart Chat Assistant
+- 📊 1000+ Bot Management
+"""
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+            markup.add(
+                types.KeyboardButton("📝 አዲስ ሱቅ መዝግብ"),
+                types.KeyboardButton("🏪 ሱቆቼ")
+            )
+            markup.add(
+                types.KeyboardButton("🔍 ሱቆችን ፈልግ"),
+                types.KeyboardButton("❓ እርዳታ")
             )
             
-            # Notify admin
-            store = get_store_info(token)
-            if store and store.get('admin_id'):
+            self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        
+        @self.bot.message_handler(commands=['superadmin'])
+        def cmd_superadmin(message):
+            chat_id = message.chat.id
+            
+            if not Config.SUPER_ADMIN_PASSWORD:
+                self.bot.reply_to(message, "❌ SUPER_ADMIN_PASSWORD not set!")
+                return
+            
+            if Config.SUPER_ADMIN_ID != 0 and chat_id != Config.SUPER_ADMIN_ID:
+                self.bot.reply_to(message, "❌ መብት የለዎትም!")
+                return
+            
+            with self.login_lock:
+                attempt = self.login_attempts.get(chat_id, {"count": 0, "lockout_until": 0})
+                if time.time() < attempt["lockout_until"]:
+                    remaining = int(attempt["lockout_until"] - time.time())
+                    self.bot.reply_to(message, f"🔒 እገዳ ላይ ነዎት! ከ {remaining} ሰከንድ በኋላ ይሞክሩ።")
+                    return
+            
+            msg = self.bot.send_message(
+                chat_id,
+                "🔐 **የ Super Admin የይለፍ ቃል ያስገቡ:**",
+                parse_mode="Markdown"
+            )
+            self.bot.register_next_step_handler(msg, self._process_super_login)
+        
+        @self.bot.message_handler(commands=['panel'])
+        def cmd_panel(message):
+            chat_id = message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.reply_to(message, "❌ /superadmin በማድረግ መጀመሪያ ይግቡ።")
+                return
+            self._show_dashboard(message)
+        
+        @self.bot.message_handler(commands=['analytics'])
+        def cmd_analytics(message):
+            chat_id = message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.reply_to(message, "❌ /superadmin በማድረግ መጀመሪያ ይግቡ።")
+                return
+            self._show_analytics(message)
+        
+        @self.bot.message_handler(commands=['bots'])
+        def cmd_bots(message):
+            chat_id = message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.reply_to(message, "❌ /superadmin በማድረግ መጀመሪያ ይግቡ።")
+                return
+            self._show_all_bots(message)
+        
+        @self.bot.message_handler(commands=['broadcast'])
+        def cmd_broadcast(message):
+            chat_id = message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.reply_to(message, "❌ /superadmin በማድረግ መጀመሪያ ይግቡ።")
+                return
+            self._show_broadcast_menu(message)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("dash_"))
+        def handle_dashboard(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            
+            action = call.data.split("_")[1]
+            
+            if action == "refresh":
+                self._show_dashboard(call.message)
+                self.bot.answer_callback_query(call.id, "🔄 Refreshed!")
+            elif action == "pending":
+                self.bot.answer_callback_query(call.id)
+                self._show_pending_stores(call.message)
+            elif action == "all":
+                self.bot.answer_callback_query(call.id)
+                self._show_all_bots(call.message)
+            elif action == "stats":
+                self.bot.answer_callback_query(call.id)
+                self._show_analytics(call.message)
+            elif action == "broadcast":
+                self.bot.answer_callback_query(call.id)
+                self._show_broadcast_menu(call.message)
+            elif action == "back":
+                self.bot.answer_callback_query(call.id)
                 try:
-                    bot.send_message(
-                        store['admin_id'],
-                        f"✅ **ክፍያ ተረጋግጧል!**\n"
-                        f"🆔 ትዕዛዝ #{order_id}\n"
-                        f"👤 ደንበኛ: {chat_id}\n"
-                        f"💰 {format_currency(total)}"
+                    self.bot.delete_message(chat_id, call.message.message_id)
+                except:
+                    pass
+                self._show_dashboard(call.message)
+            elif action == "logout":
+                self.bot.answer_callback_query(call.id)
+                self._logout(chat_id)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("sapprove_"))
+        def handle_approve(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            store_id = int(call.data.split("_")[1])
+            self._approve_store(chat_id, store_id, call)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("sreject_"))
+        def handle_reject(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            store_id = int(call.data.split("_")[1])
+            self._reject_store(chat_id, store_id, call)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("sblock_"))
+        def handle_block(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            store_id = int(call.data.split("_")[1])
+            self._block_store(chat_id, store_id, call)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("sunblock_"))
+        def handle_unblock(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            store_id = int(call.data.split("_")[1])
+            self._unblock_store(chat_id, store_id, call)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("startbot_"))
+        def handle_start_bot(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            store_id = int(call.data.split("_")[1])
+            self._start_bot(chat_id, store_id, call)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("stopbot_"))
+        def handle_stop_bot(call):
+            chat_id = call.message.chat.id
+            if not self._is_super_admin(chat_id):
+                self.bot.answer_callback_query(call.id, "❌ ሴሽን አልቋል!")
+                return
+            store_id = int(call.data.split("_")[1])
+            self._stop_bot(chat_id, store_id, call)
+        
+        @self.bot.message_handler(func=lambda m: m.text == "📝 አዲስ ሱቅ መዝግብ")
+        def handle_register(message):
+            self._start_registration(message)
+        
+        @self.bot.message_handler(func=lambda m: m.text == "🏪 ሱቆቼ")
+        def handle_my_stores(message):
+            self._show_my_stores(message)
+        
+        @self.bot.message_handler(func=lambda m: m.text == "🔍 ሱቆችን ፈልግ")
+        def handle_search_stores(message):
+            chat_id = message.chat.id
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("📝 በስም ፈልግ", callback_data="search_name"),
+                types.InlineKeyboardButton("📍 በአካባቢ ፈልግ", callback_data="search_location")
+            )
+            self.bot.send_message(chat_id, "🔍 **ሱቆችን ፈልግ**", reply_markup=markup)
+        
+        @self.bot.message_handler(func=lambda m: m.text == "❓ እርዳታ")
+        def handle_help(message):
+            cmd_start(message)
+        
+        @self.bot.message_handler(content_types=['location'])
+        def handle_location(message):
+            self._search_by_location(message)
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("search_"))
+        def handle_search(call):
+            chat_id = call.message.chat.id
+            
+            if call.data == "search_name":
+                msg = self.bot.send_message(chat_id, "📝 የሱቅ ስም ያስገቡ:")
+                self.bot.register_next_step_handler(msg, self._search_by_name)
+            elif call.data == "search_location":
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+                markup.add(types.KeyboardButton("📍 አካባቢ አጋራ", request_location=True))
+                self.bot.send_message(chat_id, "📍 አካባቢ ያጋሩ:", reply_markup=markup)
+        
+        @self.bot.message_handler(func=lambda m: self._get_reg_state(m.chat.id, "step") == 1)
+        def reg_step_token(message):
+            self._process_reg_token(message)
+        
+        @self.bot.message_handler(func=lambda m: self._get_reg_state(m.chat.id, "step") == 2)
+        def reg_step_name(message):
+            self._process_reg_name(message)
+        
+        @self.bot.message_handler(func=lambda m: self._get_reg_state(m.chat.id, "step") == 3)
+        def reg_step_password(message):
+            self._process_reg_password(message)
+        
+        @self.bot.message_handler(func=lambda m: self._get_reg_state(m.chat.id, "step") == 4)
+        def reg_step_location(message):
+            self._process_reg_location(message)
+        
+        @self.bot.message_handler(func=lambda m: self._get_reg_state(m.chat.id, "step") == 5)
+        def reg_step_description(message):
+            self._process_reg_description(message)
+    
+    def _is_super_admin(self, chat_id: int) -> bool:
+        with self.sessions_lock:
+            return chat_id in self.sessions and time.time() < self.sessions[chat_id]
+    
+    def _get_reg_state(self, chat_id: int, key: str = None):
+        with self.reg_lock:
+            state = self.reg_states.get(chat_id, {})
+            if key:
+                return state.get(key)
+            return state
+    
+    def _set_reg_state(self, chat_id: int, key: str, value: Any):
+        with self.reg_lock:
+            if chat_id not in self.reg_states:
+                self.reg_states[chat_id] = {}
+            self.reg_states[chat_id][key] = value
+    
+    def _clear_reg_state(self, chat_id: int):
+        with self.reg_lock:
+            self.reg_states.pop(chat_id, None)
+    
+    def _get_main_menu(self):
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(
+            types.KeyboardButton("📝 አዲስ ሱቅ መዝግብ"),
+            types.KeyboardButton("🏪 ሱቆቼ")
+        )
+        markup.add(
+            types.KeyboardButton("🔍 ሱቆችን ፈልግ"),
+            types.KeyboardButton("❓ እርዳታ")
+        )
+        return markup
+    
+    def _get_dashboard_markup(self):
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("⏳ ያልጸደቁ", callback_data="dash_pending"),
+            types.InlineKeyboardButton("📊 ስታቲስቲክስ", callback_data="dash_stats")
+        )
+        markup.add(
+            types.InlineKeyboardButton("📢 ማሰራጨት", callback_data="dash_broadcast"),
+            types.InlineKeyboardButton("🔄 አዘምን", callback_data="dash_refresh")
+        )
+        markup.add(types.InlineKeyboardButton("🚪 ውጣ", callback_data="dash_logout"))
+        return markup
+    
+    def _process_super_login(self, message):
+        chat_id = message.chat.id
+        password = message.text.strip()
+        
+        if password == Config.SUPER_ADMIN_PASSWORD:
+            with self.sessions_lock:
+                self.sessions[chat_id] = time.time() + Config.SESSION_TIMEOUT
+            with self.login_lock:
+                self.login_attempts[chat_id] = {"count": 0, "lockout_until": 0}
+            
+            self.bot.send_message(
+                chat_id,
+                "🔓 **እንኳን ወደ Super Admin ፓነል በደህና መጡ!**\n\n"
+                "🤖 AI-Powered 1000+ Bot Management System",
+                parse_mode="Markdown"
+            )
+            self._show_dashboard(message)
+            logger.audit(chat_id, "super_admin_login", {"success": True})
+        else:
+            with self.login_lock:
+                attempt = self.login_attempts.setdefault(chat_id, {"count": 0, "lockout_until": 0})
+                attempt["count"] += 1
+                
+                if attempt["count"] >= Config.MAX_LOGIN_ATTEMPTS:
+                    attempt["lockout_until"] = time.time() + Config.LOCKOUT_DURATION
+                    self.bot.send_message(
+                        chat_id,
+                        f"❌ {Config.MAX_LOGIN_ATTEMPTS} ጊዜ ተሳስተዋል። ለ{Config.LOCKOUT_DURATION//60} ደቂቃ ታግደዋል።"
+                    )
+                else:
+                    left = Config.MAX_LOGIN_ATTEMPTS - attempt["count"]
+                    self.bot.send_message(
+                        chat_id,
+                        f"❌ የተሳሳተ የይለፍ ቃል! {left} ሙከራዎች ቀርተውዎታል።"
+                    )
+    
+    def _logout(self, chat_id: int):
+        with self.sessions_lock:
+            self.sessions.pop(chat_id, None)
+        self.bot.send_message(chat_id, "🔒 ከአስተዳደር ወጥተዋል።", reply_markup=self._get_main_menu())
+    
+    def _show_dashboard(self, message):
+        chat_id = message.chat.id
+        
+        try:
+            total = db_execute("SELECT COUNT(*) FROM stores", fetch=True)[0][0]
+            pending = db_execute("SELECT COUNT(*) FROM stores WHERE is_approved = 0", fetch=True)[0][0]
+            active = db_execute("SELECT COUNT(*) FROM stores WHERE is_active = 1 AND is_approved = 1", fetch=True)[0][0]
+            running = db_execute("SELECT COUNT(*) FROM stores WHERE bot_status = 'running'", fetch=True)[0][0]
+            total_orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0][0]
+            revenue = db_execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1", fetch=True)[0][0]
+            
+            text = f"""
+🎛 **Super Admin Dashboard**
+
+🏪 Total Stores: **{total}**
+⏳ Pending Approval: **{pending}**
+🟢 Active Stores: **{active}**
+🤖 Running Bots: **{running}**
+🧾 Total Orders: **{total_orders}**
+💰 Total Revenue: **{format_currency(revenue)}**
+
+🤖 AI Status: {'✅ Active' if AIEngine.is_available() else '❌ Disabled'}
+
+📌 ርምጫ ይምረጡ:
+"""
+            
+            self.bot.send_message(
+                chat_id,
+                text,
+                reply_markup=self._get_dashboard_markup(),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Dashboard error: {e}")
+            self.bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
+    def _show_pending_stores(self, message):
+        chat_id = message.chat.id
+        
+        try:
+            stores = db_execute_dict("""
+                SELECT id, store_name, username, area_text, created_at
+                FROM stores WHERE is_approved = 0 AND is_active = 1
+                ORDER BY created_at DESC
+            """)
+            
+            if not stores:
+                self.bot.send_message(chat_id, "✅ ምንም ያልተጸደቁ ሱቆች የሉም!")
+                return
+            
+            for store in stores:
+                text = f"""
+🏪 **{store['store_name']}**
+🆔 #{store['id']}
+👤 @{store['username'] or 'ስም'}
+📍 {store['area_text'] or 'አልተዘጋጀም'}
+📅 {format_date(store['created_at'])}
+"""
+                markup = types.InlineKeyboardMarkup()
+                markup.add(
+                    types.InlineKeyboardButton("✅ አጽድቅ", callback_data=f"sapprove_{store['id']}"),
+                    types.InlineKeyboardButton("❌ ውድቅ አድርግ", callback_data=f"sreject_{store['id']}")
+                )
+                markup.add(types.InlineKeyboardButton("🔙 ወደ ኋላ", callback_data="dash_back"))
+                
+                self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Pending stores error: {e}")
+            self.bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
+    def _show_all_bots(self, message):
+        chat_id = message.chat.id
+        
+        try:
+            bots = db_execute_dict("""
+                SELECT id, store_name, username, is_active, is_approved,
+                       bot_status, total_orders, total_sales, created_at
+                FROM stores ORDER BY created_at DESC LIMIT 50
+            """)
+            
+            if not bots:
+                self.bot.send_message(chat_id, "📜 ምንም ቦት የለም!")
+                return
+            
+            text = "🤖 **ሁሉም ቦቶች**\n\n"
+            for bot in bots:
+                status = "🟢" if bot['is_active'] else "🔴"
+                approved = "✅" if bot['is_approved'] else "⏳"
+                bot_status = "▶️" if bot['bot_status'] == 'running' else "⏹️"
+                
+                text += f"""
+{status} {approved} {bot_status} **{bot['store_name']}**
+  🆔 #{bot['id']} | 👤 @{bot['username'] or 'ስም'}
+  📦 {bot['total_orders'] or 0} ትዕዛዝ | 💰 {format_currency(bot['total_sales'] or 0)}
+  📅 {format_date(bot['created_at'])}
+"""
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("▶️ ማስነሳት", callback_data="startbot_menu"),
+                types.InlineKeyboardButton("⏹️ ማቆም", callback_data="stopbot_menu")
+            )
+            markup.add(
+                types.InlineKeyboardButton("🔴 ማገድ", callback_data="block_menu"),
+                types.InlineKeyboardButton("🟢 ማንቃት", callback_data="unblock_menu")
+            )
+            markup.add(types.InlineKeyboardButton("🔙 ወደ ኋላ", callback_data="dash_back"))
+            
+            self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"All bots error: {e}")
+            self.bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
+    def _show_analytics(self, message):
+        chat_id = message.chat.id
+        
+        try:
+            stats = bot_manager.get_bot_stats()
+            
+            total_stores = stats['total']
+            pending = stats['pending']
+            active = db_execute("SELECT COUNT(*) FROM stores WHERE is_active = 1 AND is_approved = 1", fetch=True)[0][0]
+            running = stats['running']
+            total_products = db_execute("SELECT COUNT(*) FROM products", fetch=True)[0][0]
+            total_orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0][0]
+            revenue = db_execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1", fetch=True)[0][0]
+            
+            # Top stores
+            top_stores = db_execute_dict("""
+                SELECT s.store_name, COUNT(o.id) as orders,
+                       COALESCE(SUM(o.total_price + o.delivery_fee), 0) as revenue
+                FROM stores s
+                LEFT JOIN orders o ON s.token = o.token AND o.status_stage >= 1
+                GROUP BY s.id, s.store_name
+                ORDER BY revenue DESC LIMIT 5
+            """)
+            
+            text = f"""
+📊 **System Analytics**
+
+🤖 **Bot Statistics**
+  • Total Bots: {total_stores}
+  • Running: {running}
+  • Stopped: {stats['stopped']}
+  • Pending: {pending}
+  • Active: {active}
+
+📦 **Products:** {total_products}
+🧾 **Orders:** {total_orders}
+💰 **Revenue:** {format_currency(revenue)}
+
+🤖 **AI Status:** {'✅ Active' if AIEngine.is_available() else '❌ Disabled'}
+
+🏆 **Top Stores:**
+"""
+            for i, store in enumerate(top_stores, 1):
+                text += f"  {i}. {store['store_name']} - {store['orders']} orders - {format_currency(store['revenue'])}\n"
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🔙 ወደ ኋላ", callback_data="dash_back"))
+            
+            self.bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Analytics error: {e}")
+            self.bot.send_message(chat_id, f"❌ ስህተት: {e}")
+    
+    def _show_broadcast_menu(self, message):
+        chat_id = message.chat.id
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📢 ለሱቅ ባለቤቶች", callback_data="broadcast_owners"),
+            types.InlineKeyboardButton("👥 ለደንበኞች", callback_data="broadcast_customers"),
+            types.InlineKeyboardButton("👤 ለአንድ ተጠቃሚ", callback_data="broadcast_user"),
+            types.InlineKeyboardButton("🔙 ወደ ኋላ", callback_data="dash_back")
+        )
+        
+        self.bot.send_message(
+            chat_id,
+            "📢 **Broadcast Message**\n\nWho do you want to send the message to?",
+            reply_markup=markup
+        )
+    
+    def _broadcast_to_all(self, message, target):
+        chat_id = message.chat.id
+        msg_text = message.text
+        
+        try:
+            if target == "owners":
+                users = db_execute_dict("SELECT DISTINCT admin_id FROM stores WHERE admin_id > 0 AND is_approved = 1")
+            else:
+                users = db_execute_dict("SELECT DISTINCT customer_id FROM orders")
+            
+            if not users:
+                self.bot.reply_to(message, "❌ No users found!")
+                return
+            
+            self.bot.reply_to(message, f"⏳ Sending to {len(users)} users...")
+            
+            success = 0
+            failed = 0
+            
+            for user in users:
+                user_id = user.get('admin_id') or user.get('customer_id')
+                if not user_id:
+                    continue
+                try:
+                    self.bot.send_message(
+                        user_id,
+                        f"📢 **System Broadcast**\n\n{msg_text}"
+                    )
+                    success += 1
+                    time.sleep(0.05)
+                except:
+                    failed += 1
+            
+            self.bot.send_message(
+                chat_id,
+                f"✅ Broadcast complete!\n\n✅ Success: {success}\n❌ Failed: {failed}"
+            )
+            
+            logger.audit(chat_id, "broadcast_sent", {
+                "target": target,
+                "success": success,
+                "failed": failed
+            })
+        except Exception as e:
+            logger.error(f"Broadcast error: {e}")
+            self.bot.reply_to(message, f"❌ Error: {e}")
+    
+    def _broadcast_to_user(self, message):
+        chat_id = message.chat.id
+        
+        try:
+            user_id = int(message.text.strip())
+        except:
+            self.bot.reply_to(message, "❌ Invalid user ID!")
+            return
+        
+        msg = self.bot.send_message(chat_id, "📝 Enter the message to send:")
+        self.bot.register_next_step_handler(
+            msg,
+            lambda m: self._send_single_message(m, user_id)
+        )
+    
+    def _send_single_message(self, message, user_id):
+        chat_id = message.chat.id
+        msg_text = message.text
+        
+        try:
+            self.bot.send_message(
+                user_id,
+                f"📢 **System Broadcast**\n\n{msg_text}"
+            )
+            self.bot.reply_to(message, f"✅ Message sent to user {user_id}!")
+            logger.audit(chat_id, "single_message_sent", {"user_id": user_id})
+        except Exception as e:
+            self.bot.reply_to(message, f"❌ Failed to send: {e}")
+    
+    def _approve_store(self, chat_id: int, store_id: int, call=None):
+        try:
+            store = db_execute_dict("SELECT token, store_name, admin_id FROM stores WHERE id = %s", (store_id,))
+            if not store:
+                if call:
+                    self.bot.answer_callback_query(call.id, "❌ Store not found!")
+                return
+            
+            store = store[0]
+            db_execute("UPDATE stores SET is_approved = 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (store_id,))
+            
+            # Start the bot
+            bot_manager.start_bot(store['token'])
+            
+            try:
+                self.bot.send_message(
+                    store['admin_id'],
+                    f"🎉 **Your store has been approved!**\n\n🏪 {store['store_name']}"
+                )
+            except:
+                pass
+            
+            if call:
+                self.bot.edit_message_text(
+                    f"✅ Store #{store_id} approved!\n🏪 {store['store_name']}",
+                    chat_id,
+                    call.message.message_id
+                )
+                self.bot.answer_callback_query(call.id, "Approved!")
+            
+            logger.audit(chat_id, "store_approved", {"store_id": store_id, "store_name": store['store_name']})
+        except Exception as e:
+            logger.error(f"Approve store error: {e}")
+            if call:
+                self.bot.answer_callback_query(call.id, f"❌ {str(e)}")
+    
+    def _reject_store(self, chat_id: int, store_id: int, call=None):
+        try:
+            store = db_execute_dict("SELECT store_name, admin_id FROM stores WHERE id = %s", (store_id,))
+            if not store:
+                if call:
+                    self.bot.answer_callback_query(call.id, "❌ Store not found!")
+                return
+            
+            store = store[0]
+            db_execute("DELETE FROM stores WHERE id = %s", (store_id,))
+            
+            try:
+                self.bot.send_message(
+                    store['admin_id'],
+                    f"❌ Your store **{store['store_name']}** has been rejected."
+                )
+            except:
+                pass
+            
+            if call:
+                self.bot.edit_message_text(
+                    f"❌ Store #{store_id} rejected!\n🏪 {store['store_name']}",
+                    chat_id,
+                    call.message.message_id
+                )
+                self.bot.answer_callback_query(call.id, "Rejected!")
+            
+            logger.audit(chat_id, "store_rejected", {"store_id": store_id, "store_name": store['store_name']})
+        except Exception as e:
+            logger.error(f"Reject store error: {e}")
+            if call:
+                self.bot.answer_callback_query(call.id, f"❌ {str(e)}")
+    
+    def _block_store(self, chat_id: int, store_id: int, call=None):
+        try:
+            store = db_execute_dict("SELECT store_name, admin_id, token FROM stores WHERE id = %s", (store_id,))
+            if not store:
+                if call:
+                    self.bot.answer_callback_query(call.id, "❌ Store not found!")
+                return
+            
+            store = store[0]
+            db_execute("UPDATE stores SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (store_id,))
+            
+            # Stop the bot
+            bot_manager.stop_bot(store['token'])
+            
+            try:
+                self.bot.send_message(store['admin_id'], f"🔴 Your store **{store['store_name']}** has been blocked.")
+            except:
+                pass
+            
+            if call:
+                self.bot.edit_message_text(
+                    f"🔴 Store #{store_id} blocked!\n🏪 {store['store_name']}",
+                    chat_id,
+                    call.message.message_id
+                )
+                self.bot.answer_callback_query(call.id, "Blocked!")
+            
+            logger.audit(chat_id, "store_blocked", {"store_id": store_id, "store_name": store['store_name']})
+        except Exception as e:
+            logger.error(f"Block store error: {e}")
+            if call:
+                self.bot.answer_callback_query(call.id, f"❌ {str(e)}")
+    
+    def _unblock_store(self, chat_id: int, store_id: int, call=None):
+        try:
+            store = db_execute_dict("SELECT store_name, admin_id, token FROM stores WHERE id = %s", (store_id,))
+            if not store:
+                if call:
+                    self.bot.answer_callback_query(call.id, "❌ Store not found!")
+                return
+            
+            store = store[0]
+            db_execute("UPDATE stores SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (store_id,))
+            
+            # Start the bot
+            bot_manager.start_bot(store['token'])
+            
+            try:
+                self.bot.send_message(store['admin_id'], f"🟢 Your store **{store['store_name']}** has been unblocked.")
+            except:
+                pass
+            
+            if call:
+                self.bot.edit_message_text(
+                    f"🟢 Store #{store_id} unblocked!\n🏪 {store['store_name']}",
+                    chat_id,
+                    call.message.message_id
+                )
+                self.bot.answer_callback_query(call.id, "Unblocked!")
+            
+            logger.audit(chat_id, "store_unblocked", {"store_id": store_id, "store_name": store['store_name']})
+        except Exception as e:
+            logger.error(f"Unblock store error: {e}")
+            if call:
+                self.bot.answer_callback_query(call.id, f"❌ {str(e)}")
+    
+    def _start_bot(self, chat_id: int, store_id: int, call=None):
+        try:
+            store = db_execute_dict("SELECT store_name, admin_id, token FROM stores WHERE id = %s", (store_id,))
+            if not store:
+                if call:
+                    self.bot.answer_callback_query(call.id, "❌ Store not found!")
+                return
+            
+            store = store[0]
+            success = bot_manager.start_bot(store['token'])
+            
+            if success:
+                if call:
+                    self.bot.edit_message_text(
+                        f"▶️ Bot started!\n🏪 {store['store_name']}",
+                        chat_id,
+                        call.message.message_id
+                    )
+                    self.bot.answer_callback_query(call.id, "Started!")
+            else:
+                if call:
+                    self.bot.edit_message_text(
+                        f"❌ Failed to start bot!\n🏪 {store['store_name']}",
+                        chat_id,
+                        call.message.message_id
+                    )
+                    self.bot.answer_callback_query(call.id, "Failed!")
+        except Exception as e:
+            logger.error(f"Start bot error: {e}")
+            if call:
+                self.bot.answer_callback_query(call.id, f"❌ {str(e)}")
+    
+    def _stop_bot(self, chat_id: int, store_id: int, call=None):
+        try:
+            store = db_execute_dict("SELECT store_name, admin_id, token FROM stores WHERE id = %s", (store_id,))
+            if not store:
+                if call:
+                    self.bot.answer_callback_query(call.id, "❌ Store not found!")
+                return
+            
+            store = store[0]
+            success = bot_manager.stop_bot(store['token'])
+            
+            if success:
+                if call:
+                    self.bot.edit_message_text(
+                        f"⏹️ Bot stopped!\n🏪 {store['store_name']}",
+                        chat_id,
+                        call.message.message_id
+                    )
+                    self.bot.answer_callback_query(call.id, "Stopped!")
+            else:
+                if call:
+                    self.bot.edit_message_text(
+                        f"❌ Failed to stop bot!\n🏪 {store['store_name']}",
+                        chat_id,
+                        call.message.message_id
+                    )
+                    self.bot.answer_callback_query(call.id, "Failed!")
+        except Exception as e:
+            logger.error(f"Stop bot error: {e}")
+            if call:
+                self.bot.answer_callback_query(call.id, f"❌ {str(e)}")
+    
+    def _start_registration(self, message):
+        chat_id = message.chat.id
+        self._clear_reg_state(chat_id)
+        self._set_reg_state(chat_id, "step", 1)
+        self._set_reg_state(chat_id, "data", {})
+        
+        msg = self.bot.send_message(
+            chat_id,
+            "📝 **Step 1/5: Bot Token**\n\nEnter the token you got from @BotFather:"
+        )
+        self.bot.register_next_step_handler(msg, self._process_reg_token)
+    
+    def _process_reg_token(self, message):
+        chat_id = message.chat.id
+        token = message.text.strip()
+        
+        try:
+            test_bot = telebot.TeleBot(token)
+            bot_info = test_bot.get_me()
+        except Exception as e:
+            logger.error(f"Token validation error: {e}")
+            self.bot.reply_to(message, "❌ Invalid token! Please check and try again.")
+            return
+        
+        data = self._get_reg_state(chat_id, "data") or {}
+        data["token"] = token
+        data["bot_username"] = bot_info.username
+        self._set_reg_state(chat_id, "data", data)
+        self._set_reg_state(chat_id, "step", 2)
+        
+        msg = self.bot.send_message(
+            chat_id,
+            f"✅ Token verified! 👤 @{bot_info.username}\n\n"
+            "📝 **Step 2/5: Store Name**\n\nEnter your store name:"
+        )
+        self.bot.register_next_step_handler(msg, self._process_reg_name)
+    
+    def _process_reg_name(self, message):
+        chat_id = message.chat.id
+        name = sanitize_input(message.text.strip())
+        
+        if not name or len(name) < 3:
+            self.bot.reply_to(message, "❌ Store name must be at least 3 characters!")
+            return
+        
+        data = self._get_reg_state(chat_id, "data") or {}
+        data["store_name"] = name
+        self._set_reg_state(chat_id, "data", data)
+        self._set_reg_state(chat_id, "step", 3)
+        
+        msg = self.bot.send_message(
+            chat_id,
+            f"✅ Store name: **{name}**\n\n"
+            "📝 **Step 3/5: Password**\n\n"
+            "Enter a password for store admin (min 8 characters):"
+        )
+        self.bot.register_next_step_handler(msg, self._process_reg_password)
+    
+    def _process_reg_password(self, message):
+        chat_id = message.chat.id
+        password = message.text.strip()
+        
+        if len(password) < 8:
+            self.bot.reply_to(message, "❌ Password must be at least 8 characters!")
+            return
+        
+        data = self._get_reg_state(chat_id, "data") or {}
+        data["password"] = password
+        self._set_reg_state(chat_id, "data", data)
+        self._set_reg_state(chat_id, "step", 4)
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add(types.KeyboardButton("📍 Share Location", request_location=True))
+        
+        msg = self.bot.send_message(
+            chat_id,
+            f"✅ Password received\n\n"
+            "📝 **Step 4/5: Store Location**\n\n"
+            "Share your store location or enter city name:",
+            reply_markup=markup
+        )
+        self.bot.register_next_step_handler(msg, self._process_reg_location)
+    
+    def _process_reg_location(self, message):
+        chat_id = message.chat.id
+        data = self._get_reg_state(chat_id, "data") or {}
+        
+        if message.location:
+            data["shop_lat"] = message.location.latitude
+            data["shop_lng"] = message.location.longitude
+            location_text = f"📍 {data['shop_lat']}, {data['shop_lng']}"
+        else:
+            location_text = sanitize_input(message.text.strip())
+            if not location_text:
+                self.bot.reply_to(message, "❌ Please enter a location!")
+                return
+            data["area_text"] = location_text
+        
+        self._set_reg_state(chat_id, "data", data)
+        self._set_reg_state(chat_id, "step", 5)
+        
+        msg = self.bot.send_message(
+            chat_id,
+            f"✅ Location: {location_text}\n\n"
+            "📝 **Step 5/5: Store Description**\n\n"
+            "Enter a short description of your store:"
+        )
+        self.bot.register_next_step_handler(msg, self._process_reg_description)
+    
+    def _process_reg_description(self, message):
+        chat_id = message.chat.id
+        description = sanitize_input(message.text.strip())
+        
+        if not description:
+            self.bot.reply_to(message, "❌ Please enter a description!")
+            return
+        
+        data = self._get_reg_state(chat_id, "data") or {}
+        data["shop_description"] = description
+        data["username"] = data.get("bot_username", f"shop_{chat_id}")
+        
+        try:
+            existing = db_execute_dict("SELECT 1 FROM stores WHERE token = %s", (data["token"],))
+            if existing:
+                self.bot.reply_to(message, "❌ This token is already registered!")
+                return
+            
+            h_pass, salt = hash_password(data["password"])
+            
+            db_execute("""
+                INSERT INTO stores (
+                    token, store_name, admin_id, username,
+                    password_hash, password_salt,
+                    is_active, is_approved, shop_lat, shop_lng,
+                    area_text, shop_description
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                data["token"], data["store_name"], chat_id, data["username"],
+                h_pass, salt, 1, 0,
+                data.get("shop_lat"), data.get("shop_lng"),
+                data.get("area_text", ""), data.get("shop_description", "")
+            ))
+            
+            # Start the bot
+            bot_manager.start_bot(data["token"])
+            
+            if Config.SUPER_ADMIN_ID:
+                try:
+                    self.bot.send_message(
+                        Config.SUPER_ADMIN_ID,
+                        f"🔔 **New store pending approval!**\n\n"
+                        f"🏪 {data['store_name']}\n"
+                        f"👤 @{data['username']}"
                     )
                 except:
                     pass
             
-            logger.audit(chat_id, "payment_verified", {"order_id": order_id, "amount": total})
+            self._clear_reg_state(chat_id)
             
-        else:
-            # Payment verification failed
-            bot.send_message(
-                chat_id,
-                f"""❌ **ክፍያው ሊረጋገጥ አልቻለም**
+            self.bot.reply_to(
+                message,
+                f"✅ **Store registered successfully!**\n\n"
+                f"🏪 Name: {data['store_name']}\n"
+                f"👤 Username: @{data['username']}\n"
+                f"📍 Location: {data.get('area_text', 'Saved')}\n"
+                f"🔑 Password: `{data['password']}`\n\n"
+                f"⏳ Your store is pending approval.",
+                reply_markup=self._get_main_menu(),
+                parse_mode="Markdown"
+            )
+            
+            logger.audit(chat_id, "store_registered", {
+                "store_name": data["store_name"],
+                "store_id": data["token"]
+            })
+        except Exception as e:
+            logger.error(f"Registration error: {e}")
+            self.bot.reply_to(message, f"❌ Error: {e}")
+    
+    def _show_my_stores(self, message):
+        chat_id = message.chat.id
+        
+        try:
+            stores = db_execute_dict("""
+                SELECT id, store_name, is_active, is_approved, username, area_text, bot_status
+                FROM stores WHERE admin_id = %s
+                ORDER BY created_at DESC
+            """, (chat_id,))
+            
+            if not stores:
+                self.bot.reply_to(
+                    message,
+                    "❌ You haven't registered any stores yet.",
+                    reply_markup=self._get_main_menu()
+                )
+                return
+            
+            text = "🏪 **Your Stores:**\n\n"
+            for store in stores:
+                status = "🟢" if store['is_active'] else "🔴"
+                approved = "✅" if store['is_approved'] else "⏳"
+                bot_status = "▶️" if store['bot_status'] == 'running' else "⏹️"
+                text += f"""
+{status} {approved} {bot_status} **{store['store_name']}**
+  👤 @{store['username'] or 'N/A'}
+  📍 {store['area_text'] or 'N/A'}
+  🆔 #{store['id']}
+"""
+            
+            self.bot.reply_to(message, text, reply_markup=self._get_main_menu())
+        except Exception as e:
+            logger.error(f"My stores error: {e}")
+            self.bot.reply_to(message, f"❌ Error: {e}")
+    
+    def _search_by_name(self, message):
+        chat_id = message.chat.id
+        query = sanitize_input(message.text.strip())
+        
+        if not query:
+            self.bot.reply_to(message, "❌ Please enter a store name!")
+            return
+        
+        try:
+            stores = db_execute_dict("""
+                SELECT store_name, username, area_text, is_active, is_approved
+                FROM stores
+                WHERE (store_name ILIKE %s OR username ILIKE %s) AND is_approved = 1
+                LIMIT 10
+            """, (f"%{query}%", f"%{query}%"))
+            
+            if not stores:
+                self.bot.reply_to(message, "🔍 No stores found.", reply_markup=self._get_main_menu())
+                return
+            
+            text = "🔍 **Search Results:**\n\n"
+            for store in stores:
+                status = "🟢" if store['is_active'] else "🔴"
+                text += f"""
+{status} **{store['store_name']}**
+  👤 @{store['username'] or 'N/A'}
+  📍 {store['area_text'] or 'N/A'}
+"""
+            
+            self.bot.reply_to(message, text, reply_markup=self._get_main_menu())
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            self.bot.reply_to(message, f"❌ Error: {e}")
+    
+    def _search_by_location(self, message):
+        chat_id = message.chat.id
+        
+        if not message.location:
+            self.bot.reply_to(message, "❌ Please share your location!")
+            return
+        
+        lat = message.location.latitude
+        lng = message.location.longitude
+        
+        try:
+            stores = db_execute_dict("""
+                SELECT store_name, username, area_text, is_active,
+                       (6371 * acos(cos(radians(%s)) * cos(radians(shop_lat)) *
+                        cos(radians(shop_lng) - radians(%s)) + sin(radians(%s)) *
+                        sin(radians(shop_lat)))) as distance
+                FROM stores
+                WHERE shop_lat IS NOT NULL AND shop_lng IS NOT NULL AND is_approved = 1
+                ORDER BY distance LIMIT 10
+            """, (lat, lng, lat))
+            
+            if not stores:
+                self.bot.reply_to(message, "🔍 No stores found nearby.", reply_markup=self._get_main_menu())
+                return
+            
+            text = "📍 **Nearby Stores:**\n\n"
+            for store in stores:
+                status = "🟢" if store['is_active'] else "🔴"
+                distance = store.get('distance', 0)
+                text += f"""
+{status} **{store['store_name']}**
+  👤 @{store['username'] or 'N/A'}
+  📍 {store['area_text'] or 'N/A'}
+  📏 {distance:.1f} km
+"""
+            
+            self.bot.reply_to(message, text, reply_markup=self._get_main_menu())
+        except Exception as e:
+            logger.error(f"Location search error: {e}")
+            self.bot.reply_to(message, f"❌ Error: {e}")
+    
+    def _start_polling(self):
+        def _poll():
+            while True:
+                try:
+                    self.bot.infinity_polling(skip_pending=True, timeout=30)
+                except Exception as e:
+                    logger.error(f"Polling error: {e}")
+                    time.sleep(5)
+        
+        threading.Thread(target=_poll, daemon=True).start()
 
-🔍 ምክንያት: ደረሰኙ ትክክል አይደለም ወይም መጠኑ ከፍያው ጋር አይዛመድም
+# =================================================================================================
+#                           LOAD EXISTING STORES
+# =================================================================================================
 
-📋 ዝርዝር:
+def load_existing_stores():
+    try:
+        stores = db_execute_dict("SELECT token FROM stores WHERE is_approved = 1")
+        count = 0
+        for store in stores:
+            if bot_manager.start_bot(store['token']):
+                count += 1
+        logger.info(f"✅ {count} stores loaded and started")
+    except Exception as e:
+        logger.error(f"❌ Failed to load stores: {e}")
+
+load_existing_stores()
+
+# =================================================================================================
+#                           MAIN ENTRY POINT
+# =================================================================================================
+
+if __name__ == "__main__":
+    try:
+        control_bot = ControlBot()
+        logger.info("🚀 Ultimate Control Bot v6.0 is running!")
+        logger.info(f"🤖 AI Status: {'✅ Active' if AIEngine.is_available() else '❌ Disabled'}")
+        logger.info(f"📊 Web Dashboard: http://{Config.HOST}:{Config.PORT}")
+        logger.info(f"📊 Max Bots: {Config.MAX_BOTS}")
+        
+        # Keep main thread alive
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        logger.info("🛑 Shutting down...")
+        bot_manager.shutdown()
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        while True:
+            time.sleep(60)
