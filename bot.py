@@ -3,34 +3,6 @@
                     🚀 ULTIMATE CONTROL BOT v6.0 🚀
         ከ1000+ ቦቶች ማስተዳደር የሚችል የላቀ ሲስተም
 ====================================================================================================
-
-የዚህ ሲስተም ባህሪያት:
-    ✅ ከ1000+ ቦቶች ማስተዳደር (Multi-Bot Management)
-    ✅ ሱቅ ምዝገባ (Store Registration)
-    ✅ ምርቶችን መመዝገብ እና ማስተዳደር (Product Management)
-    ✅ AI-Powered Smart Search (Gemini)
-    ✅ Shopping Cart & Checkout
-    ✅ AI-Powered Payment Receipt Verification
-    ✅ Super Admin Dashboard
-    ✅ Store Approval Queue
-    ✅ System Analytics
-    ✅ Broadcast Messaging
-    ✅ Store Suspension/Block
-    ✅ Advanced Security
-    ✅ Database Connection Pooling
-    ✅ Thread-Safe Operations
-    ✅ Comprehensive Logging
-    ✅ Audit Trail
-    ✅ Multi-Language Support
-    ✅ REST API Endpoints
-    ✅ Web Dashboard
-    ✅ Health Checks
-    ✅ Bot Performance Monitoring
-    ✅ Auto-Restart on Crash
-    ✅ Rate Limiting
-    ✅ Session Management
-
-====================================================================================================
 """
 
 import os
@@ -48,8 +20,8 @@ import io
 import base64
 import tempfile
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple, Union, Callable
-from dataclasses import dataclass, asdict, field
+from typing import Dict, List, Optional, Any, Tuple, Union
+from dataclasses import dataclass, asdict
 from collections import defaultdict, deque
 from functools import wraps
 from contextlib import contextmanager
@@ -67,8 +39,6 @@ from flask_cors import CORS
 import google.generativeai as genai
 from PIL import Image
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # =================================================================================================
 #                           CONFIGURATION & ENVIRONMENT
@@ -77,41 +47,25 @@ from urllib3.util.retry import Retry
 class Config:
     """የሲስተም ውቅር ክፍል"""
     
-    # ==================== DATABASE ====================
     DATABASE_URL = os.environ.get("DATABASE_URL")
-    DATABASE_POOL_MIN = int(os.environ.get("DATABASE_POOL_MIN", "5"))
-    DATABASE_POOL_MAX = int(os.environ.get("DATABASE_POOL_MAX", "50"))
-    
-    # ==================== BOT TOKENS ====================
     CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
     SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
     SUPER_ADMIN_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD")
-    
-    # ==================== API KEYS ====================
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-    
-    # ==================== SERVER ====================
     PORT = int(os.environ.get("PORT", "8080"))
     HOST = os.environ.get("HOST", "0.0.0.0")
     SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
     MAX_BOTS = int(os.environ.get("MAX_BOTS", "1000"))
     
-    # ==================== SECURITY ====================
     SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "7200"))
     MAX_LOGIN_ATTEMPTS = int(os.environ.get("MAX_LOGIN_ATTEMPTS", "5"))
     LOCKOUT_DURATION = int(os.environ.get("LOCKOUT_DURATION", "900"))
-    API_RATE_LIMIT = int(os.environ.get("API_RATE_LIMIT", "60"))
-    
-    # ==================== BOT MANAGEMENT ====================
     BOT_RESTART_DELAY = int(os.environ.get("BOT_RESTART_DELAY", "5"))
     BOT_HEALTH_CHECK_INTERVAL = int(os.environ.get("BOT_HEALTH_CHECK_INTERVAL", "60"))
     MAX_BOT_RESTARTS = int(os.environ.get("MAX_BOT_RESTARTS", "5"))
     
-    # ==================== DELIVERY ====================
     BASE_DELIVERY_FEE = float(os.environ.get("BASE_DELIVERY_FEE", "30"))
     PER_KM_RATE = float(os.environ.get("PER_KM_RATE", "8"))
-    
-    # ==================== LOGGING ====================
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
     LOG_FILE = os.environ.get("LOG_FILE", "control_bot.log")
 
@@ -125,77 +79,20 @@ if not Config.CONTROL_BOT_TOKEN:
 #                           LOGGING SYSTEM
 # =================================================================================================
 
-class Logger:
-    """የላቀ ሎግ ሲስተም"""
-    
-    _instance = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialize()
-        return cls._instance
-    
-    def _initialize(self):
-        self.logger = logging.getLogger('ControlBot')
-        self.logger.setLevel(getattr(logging, Config.LOG_LEVEL))
-        
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
-        
-        # File handler
-        try:
-            file_handler = logging.FileHandler(Config.LOG_FILE)
-            file_handler.setLevel(logging.INFO)
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-        except:
-            pass
-        
-        # Log buffer for real-time monitoring
-        self._log_buffer = deque(maxlen=1000)
-        self._buffer_lock = threading.Lock()
-    
-    def _log(self, level: str, message: str, **kwargs):
-        log_method = getattr(self.logger, level.lower(), self.logger.info)
-        log_method(message)
-        
-        with self._buffer_lock:
-            self._log_buffer.append({
-                'timestamp': datetime.now().isoformat(),
-                'level': level,
-                'message': message,
-                'context': kwargs
-            })
-    
-    def debug(self, msg, **kwargs): self._log('DEBUG', msg, **kwargs)
-    def info(self, msg, **kwargs): self._log('INFO', msg, **kwargs)
-    def warning(self, msg, **kwargs): self._log('WARNING', msg, **kwargs)
-    def error(self, msg, **kwargs): self._log('ERROR', msg, **kwargs)
-    def critical(self, msg, **kwargs): self._log('CRITICAL', msg, **kwargs)
-    
-    def audit(self, user_id: int, action: str, details: dict = None, success: bool = True):
-        """Audit log"""
-        try:
-            db_execute("""
-                INSERT INTO audit_logs (user_id, action, details, success, created_at)
-                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            """, (user_id, action, json.dumps(details) if details else None, success))
-        except Exception as e:
-            self.error(f"Audit log error: {e}")
-    
-    def get_logs(self, limit: int = 100):
-        with self._buffer_lock:
-            return list(self._log_buffer)[-limit:]
+logging.basicConfig(
+    level=getattr(logging, Config.LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('ControlBot')
 
-logger = Logger()
+try:
+    file_handler = logging.FileHandler(Config.LOG_FILE)
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+except Exception as e:
+    print(f"⚠️ Could not create log file: {e}")
 
 # =================================================================================================
 #                           DATABASE LAYER
@@ -218,7 +115,7 @@ def init_db_pool():
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                 db_pool.putconn(conn)
-                logger.info(f"✅ Database pool initialized (min={Config.DATABASE_POOL_MIN}, max={Config.DATABASE_POOL_MAX})")
+                logger.info(f"✅ Database pool initialized")
             except Exception as e:
                 logger.error(f"❌ Database pool initialization failed: {e}")
                 raise
@@ -228,18 +125,22 @@ def get_db_connection():
     if db_pool is None:
         init_db_pool()
     
-    for attempt in range(3):
-        try:
-            conn = db_pool.getconn()
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            return conn
-        except Exception as e:
-            logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
-            if attempt < 2:
-                time.sleep(1)
-            else:
-                raise
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn
+    except Exception as e:
+        logger.error(f"❌ Failed to get connection: {e}")
+        with db_pool_lock:
+            try:
+                if db_pool:
+                    db_pool.closeall()
+            except:
+                pass
+            db_pool = None
+            init_db_pool()
+        return db_pool.getconn()
 
 def put_db_connection(conn):
     if conn is not None and db_pool is not None:
@@ -262,7 +163,7 @@ def db_execute(query: str, params: tuple = None, fetch: bool = False):
             conn.commit()
             return cur.rowcount if cur.rowcount > 0 else None
     except Exception as e:
-        logger.error(f"Database error: {e}\nQuery: {query[:200]}")
+        logger.error(f"❌ Database error: {e}")
         if conn:
             try:
                 conn.rollback()
@@ -281,17 +182,19 @@ def db_execute_dict(query: str, params: tuple = None):
             cur.execute(query, params or ())
             return cur.fetchall()
     except Exception as e:
-        logger.error(f"Database error: {e}")
+        logger.error(f"❌ Database error: {e}")
         raise
     finally:
         if conn:
             put_db_connection(conn)
 
 # =================================================================================================
-#                           DATABASE SCHEMA
+#                           DATABASE SCHEMA - FIXED
 # =================================================================================================
 
 def init_schema():
+    """የውሂብ ጎታ ሰንጠረዦች መፍጠር - ሁሉም created_at አምዶች ተጨምረዋል"""
+    
     schema = """
     -- =====================================================
     -- STORES TABLE
@@ -357,7 +260,9 @@ def init_schema():
         name_en TEXT,
         icon TEXT,
         parent_id INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        display_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
     -- =====================================================
@@ -368,15 +273,18 @@ def init_schema():
         token TEXT NOT NULL,
         customer_id BIGINT NOT NULL,
         customer_phone TEXT,
+        customer_name TEXT,
         status_am TEXT DEFAULT 'በመጠባበቅ ላይ',
         status_en TEXT DEFAULT 'Pending',
         status_stage INTEGER DEFAULT 0,
         total_price REAL NOT NULL,
         delivery_fee REAL DEFAULT 0,
         discount REAL DEFAULT 0,
+        commission REAL DEFAULT 0,
         payment_method TEXT,
         payment_status TEXT DEFAULT 'pending',
         payment_receipt_url TEXT,
+        tracking_number TEXT,
         delivery_address TEXT,
         delivery_lat REAL,
         delivery_lng REAL,
@@ -396,6 +304,7 @@ def init_schema():
         product_name TEXT,
         qty INTEGER NOT NULL,
         price REAL NOT NULL,
+        discount REAL DEFAULT 0,
         total REAL NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -419,6 +328,8 @@ def init_schema():
         lng REAL,
         address TEXT,
         city TEXT,
+        subcity TEXT,
+        woreda TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -431,6 +342,7 @@ def init_schema():
         action TEXT NOT NULL,
         details JSONB,
         ip_address TEXT,
+        user_agent TEXT,
         success BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -447,23 +359,120 @@ def init_schema():
     );
 
     -- =====================================================
+    -- NOTIFICATIONS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        type TEXT DEFAULT 'info',
+        link TEXT,
+        is_read BOOLEAN DEFAULT FALSE,
+        is_sent BOOLEAN DEFAULT FALSE,
+        sent_at TIMESTAMP,
+        read_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
+    -- STORE ANALYTICS TABLE
+    -- =====================================================
+    CREATE TABLE IF NOT EXISTS store_analytics (
+        id SERIAL PRIMARY KEY,
+        token TEXT NOT NULL,
+        date DATE NOT NULL,
+        visits INTEGER DEFAULT 0,
+        views INTEGER DEFAULT 0,
+        orders INTEGER DEFAULT 0,
+        revenue REAL DEFAULT 0,
+        unique_customers INTEGER DEFAULT 0,
+        conversion_rate REAL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- =====================================================
     -- INDEXES
     -- =====================================================
     CREATE INDEX IF NOT EXISTS idx_products_token ON products(token);
+    CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
     CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token);
     CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status_stage);
     CREATE INDEX IF NOT EXISTS idx_bot_metrics_token ON bot_metrics(token);
+    CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
     CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_store_analytics_token_date ON store_analytics(token, date);
+
+    -- =====================================================
+    -- VIEWS
+    -- =====================================================
+    CREATE OR REPLACE VIEW v_store_performance AS
+    SELECT 
+        s.id,
+        s.store_name,
+        s.username,
+        COUNT(DISTINCT o.id) as total_orders,
+        COALESCE(SUM(o.total_price + o.delivery_fee), 0) as total_revenue,
+        COUNT(DISTINCT o.customer_id) as unique_customers,
+        AVG(o.total_price) as avg_order_value,
+        s.rating,
+        s.total_orders as order_count,
+        s.total_sales as total_sales,
+        s.bot_status
+    FROM stores s
+    LEFT JOIN orders o ON s.token = o.token AND o.status_stage >= 1
+    GROUP BY s.id, s.store_name, s.username, s.rating, s.total_orders, s.total_sales, s.bot_status;
+
+    CREATE OR REPLACE VIEW v_daily_stats AS
+    SELECT 
+        DATE(created_at) as date,
+        COUNT(*) as orders,
+        COUNT(DISTINCT customer_id) as customers,
+        COALESCE(SUM(total_price + delivery_fee), 0) as revenue,
+        COALESCE(AVG(total_price + delivery_fee), 0) as avg_order
+    FROM orders
+    WHERE status_stage >= 1
+    GROUP BY DATE(created_at)
+    ORDER BY date DESC;
     """
     
     try:
         db_execute(schema)
-        logger.info("✅ Database schema initialized")
+        logger.info("✅ Database schema initialized successfully")
+        
+        # Seed initial settings
+        seed_settings()
     except Exception as e:
         logger.error(f"❌ Schema initialization failed: {e}")
         raise
 
+def seed_settings():
+    """ነባሪ ቅንብሮችን መጨመር"""
+    try:
+        settings = [
+            ('app_name', '"Control Bot v6.0"'),
+            ('app_version', '"6.0.0"'),
+            ('commission_rate', '0.05'),
+            ('delivery_base_fee', '30'),
+            ('delivery_per_km', '8'),
+            ('max_delivery_distance', '50'),
+            ('currency', '"ETB"'),
+            ('currency_symbol', '"Br"'),
+            ('default_language', '"am"'),
+        ]
+        
+        for key, value in settings:
+            db_execute("""
+                INSERT INTO settings (key, value) 
+                VALUES (%s, %s) 
+                ON CONFLICT (key) DO NOTHING
+            """, (key, value))
+    except Exception as e:
+        logger.warning(f"Seed settings error: {e}")
+
+# Initialize database
 init_db_pool()
 init_schema()
 
@@ -601,6 +610,10 @@ def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
     hashed = hashlib.sha256((password + salt).encode()).hexdigest()
     return hashed, salt
 
+def verify_password(password: str, hashed: str, salt: str) -> bool:
+    test_hash, _ = hash_password(password, salt)
+    return test_hash == hashed
+
 def calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     R = 6371
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -662,7 +675,7 @@ def get_store_info(token: str) -> Optional[Dict]:
             SELECT id, store_name, admin_id, username, is_active, is_approved,
                    area_text, shop_description, shop_lat, shop_lng,
                    telebirr, cbebirr, bank_name, bank_account,
-                   bot_status, restart_count
+                   bot_status, restart_count, total_orders, total_sales
             FROM stores WHERE token = %s
         """, (token,))
         if result:
@@ -681,26 +694,38 @@ def update_bot_status(token: str, status: str):
     except Exception as e:
         logger.error(f"Update bot status error: {e}")
 
-def get_bot_metrics(token: str, metric: str) -> float:
+def get_customer_info(chat_id: int) -> Optional[Dict]:
     try:
-        result = db_execute(
-            "SELECT metric_value FROM bot_metrics WHERE token = %s AND metric_name = %s ORDER BY recorded_at DESC LIMIT 1",
-            (token, metric), fetch=True
+        result = db_execute_dict(
+            "SELECT phone, lat, lng, address, city FROM customer_info WHERE chat_id = %s",
+            (chat_id,)
         )
         if result:
-            return safe_float(result[0][0])
-        return 0
-    except:
-        return 0
-
-def record_bot_metric(token: str, metric: str, value: float):
-    try:
-        db_execute(
-            "INSERT INTO bot_metrics (token, metric_name, metric_value) VALUES (%s, %s, %s)",
-            (token, metric, value)
-        )
+            return dict(result[0])
+        return None
     except Exception as e:
-        logger.error(f"Record metric error: {e}")
+        logger.error(f"Get customer info error: {e}")
+        return None
+
+def save_customer_info(chat_id: int, phone: str = None, lat: float = None, lng: float = None, address: str = None):
+    try:
+        if phone:
+            db_execute(
+                "INSERT INTO customer_info (chat_id, phone) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET phone = EXCLUDED.phone",
+                (chat_id, phone)
+            )
+        if lat is not None and lng is not None:
+            db_execute(
+                "INSERT INTO customer_info (chat_id, lat, lng) VALUES (%s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng",
+                (chat_id, lat, lng)
+            )
+        if address:
+            db_execute(
+                "INSERT INTO customer_info (chat_id, address) VALUES (%s, %s) ON CONFLICT (chat_id) DO UPDATE SET address = EXCLUDED.address",
+                (chat_id, address)
+            )
+    except Exception as e:
+        logger.error(f"Save customer info error: {e}")
 
 # =================================================================================================
 #                           FLASK WEB SERVER
@@ -736,10 +761,6 @@ def home():
             .footer { text-align: center; color: #999; margin-top: 30px; font-size: 12px; }
             .commands { display: flex; gap: 10px; flex-wrap: wrap; margin: 15px 0; }
             .commands code { background: #f0f0f0; padding: 8px 15px; border-radius: 8px; font-size: 14px; color: #333; }
-            .bot-status { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
-            .bot-running { background: #4CAF50; color: white; }
-            .bot-stopped { background: #f44336; color: white; }
-            .bot-pending { background: #FF9800; color: white; }
         </style>
     </head>
     <body>
@@ -747,7 +768,6 @@ def home():
             <h1>🚀 Ultimate Control Bot</h1>
             <p class="subtitle">Manage 1000+ Shop Bots</p>
             <div class="status">🟢 Online</div>
-            
             <div class="stats" id="stats">
                 <div class="stat-item">
                     <div class="stat-number" id="total-stores">-</div>
@@ -774,7 +794,6 @@ def home():
                     <div class="stat-label">Total Revenue</div>
                 </div>
             </div>
-            
             <div class="info">
                 <h3>📌 Quick Commands</h3>
                 <div class="commands">
@@ -786,7 +805,6 @@ def home():
                     <code>/bots</code>
                 </div>
             </div>
-            
             <div class="info">
                 <h3>🤖 AI Features</h3>
                 <p>🔍 Natural Language Search</p>
@@ -794,12 +812,10 @@ def home():
                 <p>💬 Smart Chat Assistant</p>
                 <p>📊 Bot Performance Monitoring</p>
             </div>
-            
             <div class="footer">
                 © 2026 Ultimate Control Bot v6.0 | Powered by Gemini AI | Supports 1000+ Bots
             </div>
         </div>
-        
         <script>
             async function loadStats() {
                 try {
@@ -855,27 +871,6 @@ def api_bots():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/bot/<token>')
-def api_bot_detail(token):
-    try:
-        bot = get_store_info(token)
-        if not bot:
-            return jsonify({"error": "Bot not found"}), 404
-        
-        metrics = {
-            "orders": get_bot_metrics(token, "orders"),
-            "revenue": get_bot_metrics(token, "revenue"),
-            "customers": get_bot_metrics(token, "customers"),
-            "uptime": get_bot_metrics(token, "uptime")
-        }
-        
-        return jsonify({
-            "bot": bot,
-            "metrics": metrics
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/api/health')
 def api_health():
     try:
@@ -922,7 +917,6 @@ class BotManager:
         return cls._instance
     
     def _initialize(self):
-        """Bot Manager ን መጀመር"""
         self._executor = ThreadPoolExecutor(max_workers=Config.DATABASE_POOL_MAX * 2)
         self._health_check_thread = None
         self._running = True
@@ -930,7 +924,6 @@ class BotManager:
         logger.info("✅ Bot Manager initialized (supports 1000+ bots)")
     
     def _start_health_check(self):
-        """የቦት ጤና ቼክ መጀመር"""
         def health_check_loop():
             while self._running:
                 try:
@@ -944,9 +937,7 @@ class BotManager:
         self._health_check_thread.start()
     
     def _check_all_bots(self):
-        """ሁሉንም ቦቶች ማረጋገጥ"""
         try:
-            # Get all active bots
             bots = db_execute_dict("""
                 SELECT token, store_name, bot_status, is_active, is_approved
                 FROM stores 
@@ -960,19 +951,16 @@ class BotManager:
                 if bot['is_active'] == 1 and bot['is_approved'] == 1:
                     should_run.add(bot['token'])
             
-            # Start bots that should be running but aren't
             to_start = should_run - current_running
             for token in to_start:
                 logger.info(f"🔄 Auto-restarting bot: {token[:15]}...")
                 self.start_bot(token)
             
-            # Stop bots that shouldn't be running
             to_stop = current_running - should_run
             for token in to_stop:
                 logger.info(f"🛑 Stopping bot: {token[:15]}...")
                 self.stop_bot(token)
             
-            # Update status for all bots
             for bot in bots:
                 status = 'running' if bot['token'] in running_tokens else 'stopped'
                 if bot['bot_status'] != status:
@@ -982,25 +970,21 @@ class BotManager:
             logger.error(f"Health check error: {e}")
     
     def start_bot(self, token: str) -> bool:
-        """አንድ ቦት ማስነሳት"""
         with running_lock:
             if token in running_tokens:
                 return True
         
         try:
-            # Check if bot is approved and active
             store = get_store_info(token)
             if not store or store.get('is_approved', 0) != 1 or store.get('is_active', 1) != 1:
                 logger.warning(f"Cannot start bot {token[:15]}: not approved or inactive")
                 return False
             
-            # Check restart limit
             with bot_restart_lock:
                 if bot_restart_tracker[token] >= Config.MAX_BOT_RESTARTS:
                     logger.warning(f"Bot {token[:15]} has exceeded max restarts")
                     return False
             
-            # Start the bot
             success = self._start_bot_thread(token)
             
             if success:
@@ -1021,7 +1005,6 @@ class BotManager:
             return False
     
     def _start_bot_thread(self, token: str) -> bool:
-        """ቦት በተለየ ስርዓተ ክር ማስነሳት"""
         try:
             with bot_threads_lock:
                 if token in bot_threads:
@@ -1032,7 +1015,6 @@ class BotManager:
                         setup_bot_handlers(token)
                     except Exception as e:
                         logger.error(f"Bot {token[:15]} crashed: {e}")
-                        # Auto-restart
                         time.sleep(Config.BOT_RESTART_DELAY)
                         self.start_bot(token)
                 
@@ -1045,7 +1027,6 @@ class BotManager:
             return False
     
     def stop_bot(self, token: str) -> bool:
-        """አንድ ቦት ማቆም"""
         with running_lock:
             if token not in running_tokens:
                 return True
@@ -1055,20 +1036,17 @@ class BotManager:
             
             with bot_threads_lock:
                 if token in bot_threads:
-                    # Thread will exit on its own
                     del bot_threads[token]
             
             logger.info(f"🛑 Bot stopped: {token[:15]}...")
             return True
     
     def restart_bot(self, token: str) -> bool:
-        """አንድ ቦት እንደገና ማስነሳት"""
         self.stop_bot(token)
         time.sleep(1)
         return self.start_bot(token)
     
     def get_all_bots(self) -> List[Dict]:
-        """ሁሉንም ቦቶች ማግኘት"""
         try:
             return db_execute_dict("""
                 SELECT id, store_name, username, is_active, is_approved, 
@@ -1082,7 +1060,6 @@ class BotManager:
             return []
     
     def get_bot_stats(self) -> Dict:
-        """የቦት ስታቲስቲክስ ማግኘት"""
         try:
             total = db_execute("SELECT COUNT(*) FROM stores", fetch=True)[0][0]
             running = db_execute("SELECT COUNT(*) FROM stores WHERE bot_status = 'running'", fetch=True)[0][0]
@@ -1100,13 +1077,11 @@ class BotManager:
             return {"total": 0, "running": 0, "stopped": 0, "pending": 0}
     
     def shutdown(self):
-        """Bot Manager ን መዝጋት"""
         self._running = False
         if self._executor:
             self._executor.shutdown(wait=False)
         logger.info("🛑 Bot Manager shutting down")
 
-# Initialize Bot Manager
 bot_manager = BotManager()
 
 # =================================================================================================
@@ -1737,8 +1712,7 @@ class ControlBot:
             
             self.bot.send_message(
                 chat_id,
-                "🔓 **እንኳን ወደ Super Admin ፓነል በደህና መጡ!**\n\n"
-                "🤖 AI-Powered 1000+ Bot Management System",
+                "🔓 **እንኳን ወደ Super Admin ፓነል በደህና መጡ!**\n\n🤖 AI-Powered 1000+ Bot Management System",
                 parse_mode="Markdown"
             )
             self._show_dashboard(message)
@@ -1893,7 +1867,6 @@ class ControlBot:
             total_orders = db_execute("SELECT COUNT(*) FROM orders", fetch=True)[0][0]
             revenue = db_execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1", fetch=True)[0][0]
             
-            # Top stores
             top_stores = db_execute_dict("""
                 SELECT s.store_name, COUNT(o.id) as orders,
                        COALESCE(SUM(o.total_price + o.delivery_fee), 0) as revenue
@@ -2035,8 +2008,6 @@ class ControlBot:
             
             store = store[0]
             db_execute("UPDATE stores SET is_approved = 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (store_id,))
-            
-            # Start the bot
             bot_manager.start_bot(store['token'])
             
             try:
@@ -2104,8 +2075,6 @@ class ControlBot:
             
             store = store[0]
             db_execute("UPDATE stores SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (store_id,))
-            
-            # Stop the bot
             bot_manager.stop_bot(store['token'])
             
             try:
@@ -2137,8 +2106,6 @@ class ControlBot:
             
             store = store[0]
             db_execute("UPDATE stores SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (store_id,))
-            
-            # Start the bot
             bot_manager.start_bot(store['token'])
             
             try:
@@ -2367,16 +2334,13 @@ class ControlBot:
                 data.get("area_text", ""), data.get("shop_description", "")
             ))
             
-            # Start the bot
             bot_manager.start_bot(data["token"])
             
             if Config.SUPER_ADMIN_ID:
                 try:
                     self.bot.send_message(
                         Config.SUPER_ADMIN_ID,
-                        f"🔔 **New store pending approval!**\n\n"
-                        f"🏪 {data['store_name']}\n"
-                        f"👤 @{data['username']}"
+                        f"🔔 **New store pending approval!**\n\n🏪 {data['store_name']}\n👤 @{data['username']}"
                     )
                 except:
                     pass
@@ -2553,7 +2517,6 @@ if __name__ == "__main__":
         logger.info(f"📊 Web Dashboard: http://{Config.HOST}:{Config.PORT}")
         logger.info(f"📊 Max Bots: {Config.MAX_BOTS}")
         
-        # Keep main thread alive
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
