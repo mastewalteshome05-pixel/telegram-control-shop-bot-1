@@ -15,7 +15,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from datetime import datetime
 
 # ============================================================
-# LOGGING SETUP ✅ NEW
+# LOGGING SETUP
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -182,7 +182,6 @@ def init_db():
                                 qty INTEGER,
                                 price REAL)''')
             
-            # ✅ NEW: Add index for performance
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_products_token ON products(token)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token)")
             
@@ -266,7 +265,7 @@ def save_customer_location(chat_id, lat, lng):
         put_conn(conn)
 
 # ============================================================
-# 4. LOCALIZATION
+# 4. LOCALIZATION - FIXED
 # ============================================================
 STRINGS = {
     "am": {
@@ -274,9 +273,9 @@ STRINGS = {
         "shop": "🛍️ ምርቶችን እይ",
         "cart": "🛒 የእኔ ጋሪ",
         "track": "📦 ትዕዛዝ መከታተያ",
-        "faq": "❓ መረጃ (FAQ)",
-        "search": "🔍 ፍለጋ/Search",
-        "back": "🔙 ወደ ኋላ / Back",
+        "faq": "❓ መረጃ",
+        "search": "🔍 ፍለጋ",
+        "back": "🔙 ወደ ኋላ",
         "empty": "🛒 ጋሪዎ በአሁኑ ሰዓት ባዶ ነው።",
         "added": "ወደ ጋሪ ተጨምሯል! 🛒",
         "total": "አጠቃላይ ድምር",
@@ -315,6 +314,28 @@ STRINGS = {
     }
 }
 
+# ============================================================
+# CONTROL BOT STRINGS - FIXED
+# ============================================================
+CONTROL_STRINGS = {
+    "am": {
+        "welcome": "👋 እንኳን ወደ ሱቅ ቦት መመዝገቢያ በደህና መጡ!\n\n📌 **አዲስ ሱቅ ለመመዝገብ:**\n1️⃣ @BotFather ላይ `/newbot` በማድረግ ቦት ይፍጠሩ\n2️⃣ Token ከተቀበሉ '📝 አዲስ ሱቅ መዝግብ' ይጫኑ\n3️⃣ 5 ደረጃዎችን ይሙሉ\n\n📌 **ሱቆችዎን ለማየት:** 🏪 ሱቆቼ\n\n👑 **Super Admin ከሆኑ:** `/superadmin`",
+        "register": "📝 አዲስ ሱቅ መዝግብ",
+        "my_stores": "🏪 ሱቆቼ",
+        "search": "🔍 ሱቆችን ፈልግ",
+        "help": "❓ እርዳታ",
+        "back": "🔙 ወደ ኋላ"
+    },
+    "en": {
+        "welcome": "👋 Welcome to Store Registration Bot!\n\n📌 **To register a new store:**\n1️⃣ Create a bot with @BotFather using `/newbot`\n2️⃣ Click '📝 Register New Store' after receiving the token\n3️⃣ Complete 5 steps\n\n📌 **View your stores:** 🏪 My Stores\n\n👑 **If you're Super Admin:** `/superadmin`",
+        "register": "📝 Register New Store",
+        "my_stores": "🏪 My Stores",
+        "search": "🔍 Search Stores",
+        "help": "❓ Help",
+        "back": "🔙 Back"
+    }
+}
+
 ADMIN_BTN = {
     "add_product": "➕ ምርት ጨምር",
     "my_products": "📋 ምርቶቼ",
@@ -326,7 +347,7 @@ ADMIN_BTN = {
     "logout": "🚪 ውጣ"
 }
 
-# ✅ FIX: Use locks for thread-safe global state
+# Thread-safe global state
 user_carts = {}
 user_carts_lock = threading.Lock()
 active_sessions = {}
@@ -974,9 +995,6 @@ def setup_bot_handlers(token):
         text = f"📊 **ስታትስቲክስ**\n\n📦 ምርት: {product_count}\n🧾 ትዕዛዝ: {total_orders}\n✅ የተከፈለ: {paid_count}\n💵 ገቢ: {revenue} ETB"
         bot.send_message(chat_id, text, reply_markup=get_back_button(lang), parse_mode="Markdown")
 
-    # ============================================================
-    # 5.3 BACK BUTTON
-    # ============================================================
     @bot.callback_query_handler(func=lambda call: call.data == "back_to_main")
     def back_to_main(call):
         chat_id = call.message.chat.id
@@ -987,10 +1005,6 @@ def setup_bot_handlers(token):
             pass
         bot.send_message(chat_id, "🔙 ወደ ዋና ሜኑ", reply_markup=get_main_menu(lang))
 
-    # ============================================================
-    # 5.4 SEARCH HANDLERS
-    # ============================================================
-    
     @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["search"])
     def search_menu(message):
         chat_id = message.chat.id
@@ -1002,8 +1016,6 @@ def setup_bot_handlers(token):
         markup.add(
             types.InlineKeyboardButton("📝 በስም ፈልግ", callback_data="search_name"),
             types.InlineKeyboardButton("💰 በዋጋ", callback_data="search_price"),
-            # ✅ FIX: Temporarily remove category search until implemented
-            # types.InlineKeyboardButton("🏷️ በምድብ", callback_data="search_category"),
             types.InlineKeyboardButton("🤖 AI ፍለጋ", callback_data="search_ai"),
             types.InlineKeyboardButton(STRINGS[lang]["back"], callback_data="back_to_main")
         )
@@ -1022,9 +1034,6 @@ def setup_bot_handlers(token):
         elif call.data == "search_price":
             msg = bot.send_message(chat_id, "💰 ዝቅተኛ እና ከፍተኛ ዋጋ በኮማ ይላኩ (ለም: 100,500):")
             bot.register_next_step_handler(msg, process_search_by_price)
-        elif call.data == "search_category":
-            # ✅ FIX: Show message that category search is coming soon
-            bot.send_message(chat_id, "🏷️ በምድብ ፍለጋ በቅርቡ ይመጣል! እባክዎ በስም ወይም በዋጋ ይፈልጉ።", reply_markup=get_back_button(lang))
         elif call.data == "search_ai":
             msg = bot.send_message(chat_id, "🤖 ፍለጋዎን በተፈጥሮ ቋንቋ ይጻፉ:")
             bot.register_next_step_handler(msg, process_search_by_ai)
@@ -1054,17 +1063,6 @@ def setup_bot_handlers(token):
         results = search_engine.search(min_price=min_price, max_price=max_price)
         display_search_results(chat_id, lang, results, f"💰 {min_price} - {max_price if max_price else '∞'} ETB")
 
-    def process_search_by_category(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        category = message.text.strip()
-        if not category:
-            bot.send_message(chat_id, "❌ ምድብ ያስገቡ", reply_markup=get_back_button(lang))
-            return
-        search_engine = ProductSearchEngine(token)
-        results = search_engine.search(category=category)
-        display_search_results(chat_id, lang, results, f"🏷️ {category}")
-
     def process_search_by_ai(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
@@ -1087,10 +1085,6 @@ def setup_bot_handlers(token):
             logger.error(f"AI error: {e}")
             bot.send_message(chat_id, "❌ AI ስህተት", reply_markup=get_back_button(lang))
 
-    # ============================================================
-    # 5.5 CUSTOMER HANDLERS
-    # ============================================================
-    
     @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["shop"])
     def list_products(message):
         chat_id = message.chat.id
@@ -1435,7 +1429,6 @@ def setup_bot_handlers(token):
         if not is_verified_admin(chat_id):
             return
         new_pass = message.text.strip()
-        # ✅ FIX: Match registration requirement (8 chars)
         if len(new_pass) < 8:
             bot.reply_to(message, "❌ ቢያንስ 8 ፊደል")
             return
@@ -1819,7 +1812,6 @@ def load_existing_stores_from_db():
     conn = get_safe_connection()
     try:
         with conn.cursor() as cursor:
-            # ✅ FIX: Load ALL approved stores, even if they haven't been started yet
             cursor.execute("SELECT token FROM stores WHERE is_approved = 1")
             rows = cursor.fetchall()
     finally:
@@ -1833,7 +1825,7 @@ def load_existing_stores_from_db():
 load_existing_stores_from_db()
 
 # ============================================================
-# 7. CONTROL BOT WITH SUPER ADMIN PANEL
+# 7. CONTROL BOT WITH SUPER ADMIN PANEL - FIXED
 # ============================================================
 CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
 SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
@@ -1858,49 +1850,21 @@ if CONTROL_BOT_TOKEN:
             return chat_id in super_admin_sessions and time.time() < super_admin_sessions[chat_id]
 
     # ============================================================
-    # 7.1 DASHBOARD FUNCTIONS
+    # 7.1 CONTROL BOT MAIN MENU - FIXED
     # ============================================================
     
-    def render_dashboard_text():
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_approved=0")
-                pending = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_active=1 AND is_approved=1")
-                active = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM stores")
-                total = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '24 hours'")
-                today_orders = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM orders")
-                total_orders = cursor.fetchone()[0]
-                cursor.execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1")
-                revenue = cursor.fetchone()[0]
-        finally:
-            put_conn(conn)
-        return (
-            "🎛 **Super Admin Dashboard**\n\n"
-            f"🏪 Total stores: **{total}**\n"
-            f"⏳ Pending approval: **{pending}**\n"
-            f"🟢 Active stores: **{active}**\n"
-            f"🧾 Orders (24h): **{today_orders}**\n"
-            f"📦 Total orders: **{total_orders}**\n"
-            f"💰 Revenue: **{revenue:,.2f} ETB**\n\n"
-            "Choose an action below 👇"
+    def get_control_main_menu(lang="am"):
+        cs = CONTROL_STRINGS[lang]
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(
+            types.KeyboardButton(cs["register"]),
+            types.KeyboardButton(cs["my_stores"])
         )
-
-    def get_dashboard_markup():
-        m = types.InlineKeyboardMarkup(row_width=2)
-        m.add(
-            types.InlineKeyboardButton("⏳ Pending Stores", callback_data="dash_pending"),
-            types.InlineKeyboardButton("🏢 All Stores", callback_data="dash_all"),
-            types.InlineKeyboardButton("📊 Stats", callback_data="dash_stats"),
-            types.InlineKeyboardButton("📢 Broadcast", callback_data="dash_broadcast"),
-            types.InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
-            types.InlineKeyboardButton("🔙 Back to Menu", callback_data="dash_back")
+        markup.add(
+            types.KeyboardButton(cs["search"]),
+            types.KeyboardButton(cs["help"])
         )
-        return m
+        return markup
 
     # ============================================================
     # 7.2 SUPER ADMIN LOGIN
@@ -1959,20 +1923,49 @@ if CONTROL_BOT_TOKEN:
                     control_bot.send_message(chat_id, f"❌ የተሳሳተ የይለፍ ቃል! {left} ሙከራዎች ቀርተውዎታል።")
 
     # ============================================================
-    # 7.3 DASHBOARD PANEL - /panel COMMAND
+    # 7.3 DASHBOARD FUNCTIONS
     # ============================================================
-    @control_bot.message_handler(commands=['panel'])
-    def open_dashboard(message):
-        chat_id = message.chat.id
-        if not is_super_admin(chat_id):
-            control_bot.reply_to(message, "❌ /superadmin በማድረግ መጀመሪያ ይግቡ።")
-            return
-        control_bot.send_message(
-            chat_id,
-            render_dashboard_text(),
-            reply_markup=get_dashboard_markup(),
-            parse_mode="Markdown"
+    
+    def render_dashboard_text():
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_approved=0")
+                pending = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_active=1 AND is_approved=1")
+                active = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores")
+                total = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '24 hours'")
+                today_orders = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM orders")
+                total_orders = cursor.fetchone()[0]
+                cursor.execute("SELECT COALESCE(SUM(total_price + delivery_fee), 0) FROM orders WHERE status_stage >= 1")
+                revenue = cursor.fetchone()[0]
+        finally:
+            put_conn(conn)
+        return (
+            "🎛 **Super Admin Dashboard**\n\n"
+            f"🏪 Total stores: **{total}**\n"
+            f"⏳ Pending approval: **{pending}**\n"
+            f"🟢 Active stores: **{active}**\n"
+            f"🧾 Orders (24h): **{today_orders}**\n"
+            f"📦 Total orders: **{total_orders}**\n"
+            f"💰 Revenue: **{revenue:,.2f} ETB**\n\n"
+            "Choose an action below 👇"
         )
+
+    def get_dashboard_markup():
+        m = types.InlineKeyboardMarkup(row_width=2)
+        m.add(
+            types.InlineKeyboardButton("⏳ Pending Stores", callback_data="dash_pending"),
+            types.InlineKeyboardButton("🏢 All Stores", callback_data="dash_all"),
+            types.InlineKeyboardButton("📊 Stats", callback_data="dash_stats"),
+            types.InlineKeyboardButton("📢 Broadcast", callback_data="dash_broadcast"),
+            types.InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
+            types.InlineKeyboardButton("🔙 Back to Menu", callback_data="dash_back")
+        )
+        return m
 
     # ============================================================
     # 7.4 DASHBOARD CALLBACK HANDLER
@@ -2080,7 +2073,6 @@ if CONTROL_BOT_TOKEN:
                     cursor.execute("UPDATE stores SET is_approved = 1 WHERE id=%s", (store_id,))
                     conn.commit()
                     
-                    # ✅ FIX: Start the bot immediately after approval
                     start_shop_bot(token)
                     
                     try:
@@ -2439,34 +2431,34 @@ if CONTROL_BOT_TOKEN:
             control_bot.reply_to(message, f"❌ መልእክት ለ {user_id} መላክ አልተቻለም!", reply_markup=get_dashboard_markup())
 
     # ============================================================
-    # 7.9 NORMAL USER COMMANDS
+    # 7.9 CONTROL BOT USER COMMANDS - FIXED
     # ============================================================
+    
     @control_bot.message_handler(commands=['start', 'help'])
     def control_help(message):
         chat_id = message.chat.id
+        lang = "am"  # Default to Amharic
         
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add(
-            types.KeyboardButton("📝 አዲስ ሱቅ መዝግብ"),
-            types.KeyboardButton("🏪 ሱቆቼ"),
-            types.KeyboardButton("🔍 ሱቆችን ፈልግ"),
-            types.KeyboardButton("❓ እርዳታ")
-        )
+        # Check if user has selected language
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT lang FROM user_langs WHERE chat_id=%s", (chat_id,))
+                row = cursor.fetchone()
+                if row:
+                    lang = row[0]
+        finally:
+            put_conn(conn)
         
-        help_text = (
-            "👋 እንኳን ወደ ሱቅ ቦት መመዝገቢያ በደህና መጡ!\n\n"
-            "📌 **አዲስ ሱቅ ለመመዝገብ:**\n"
-            "1️⃣ @BotFather ላይ `/newbot` በማድረግ ቦት ይፍጠሩ\n"
-            "2️⃣ Token ከተቀበሉ '📝 አዲስ ሱቅ መዝግብ' ይጫኑ\n"
-            "3️⃣ 5 ደረጃዎችን ይሙሉ\n\n"
-            "📌 **ሱቆችዎን ለማየት:** 🏪 ሱቆቼ\n\n"
-            "👑 **Super Admin ከሆኑ:** `/superadmin`"
+        cs = CONTROL_STRINGS[lang]
+        control_bot.send_message(
+            chat_id,
+            cs["welcome"],
+            reply_markup=get_control_main_menu(lang),
+            parse_mode="Markdown"
         )
-        control_bot.send_message(chat_id, help_text, reply_markup=markup, parse_mode="Markdown")
 
-    # ✅ FIX: REMOVED /demo command entirely - it was causing infinite error loops
-
-    @control_bot.message_handler(func=lambda m: m.text == "📝 አዲስ ሱቅ መዝግብ")
+    @control_bot.message_handler(func=lambda m: m.text == CONTROL_STRINGS["am"]["register"] or m.text == CONTROL_STRINGS["en"]["register"])
     def start_registration(message):
         chat_id = message.chat.id
         
@@ -2528,7 +2520,6 @@ if CONTROL_BOT_TOKEN:
         chat_id = message.chat.id
         password = message.text.strip()
         
-        # ✅ FIX: Match password requirement (8 chars)
         if len(password) < 8:
             control_bot.reply_to(message, "❌ ቢያንስ 8 ፊደል!")
             return
@@ -2586,7 +2577,6 @@ if CONTROL_BOT_TOKEN:
                 return
             data = reg_states[chat_id]["data"]
             data["shop_description"] = description
-            # ✅ FIX: Use real bot username instead of fake one
             data["username"] = data.get("bot_username", f"shop_{chat_id}")
         
         conn = get_safe_connection()
@@ -2609,7 +2599,7 @@ if CONTROL_BOT_TOKEN:
                                 data.get("shop_description", "")))
                 conn.commit()
                 
-                # ✅ FIX: Start the bot immediately (it will show "pending approval" message)
+                # Start the bot immediately
                 start_shop_bot(data["token"])
                 
                 if SUPER_ADMIN_ID:
@@ -2635,7 +2625,8 @@ if CONTROL_BOT_TOKEN:
                     f"📍 **አካባቢ:** {data.get('area_text', 'ተቀምጧል')}\n"
                     f"📝 **መግለጫ:** {data.get('shop_description', '')[:50]}...\n\n"
                     f"🔑 **የይለፍ ቃል:** `{data['password']}`\n\n"
-                    f"⏳ **ሱቅዎ ለማጽደቅ በመጠባበቅ ላይ ነው!**"
+                    f"⏳ **ሱቅዎ ለማጽደቅ በመጠባበቅ ላይ ነው!**",
+                    reply_markup=get_control_main_menu("am")
                 )
         except Exception as e:
             logger.error(f"Registration error: {e}")
@@ -2643,7 +2634,7 @@ if CONTROL_BOT_TOKEN:
         finally:
             put_conn(conn)
 
-    @control_bot.message_handler(func=lambda m: m.text == "🏪 ሱቆቼ")
+    @control_bot.message_handler(func=lambda m: m.text == CONTROL_STRINGS["am"]["my_stores"] or m.text == CONTROL_STRINGS["en"]["my_stores"])
     def show_my_stores_control(message):
         chat_id = message.chat.id
         
@@ -2659,7 +2650,8 @@ if CONTROL_BOT_TOKEN:
             control_bot.reply_to(
                 message,
                 "❌ ምንም ሱቅ አልተመዘገቡም።\n\n"
-                "📌 አዲስ ሱቅ ለመመዝገብ '📝 አዲስ ሱቅ መዝግብ' ይጫኑ"
+                "📌 አዲስ ሱቅ ለመመዝገብ '📝 አዲስ ሱቅ መዝግብ' ይጫኑ",
+                reply_markup=get_control_main_menu("am")
             )
             return
         
@@ -2672,9 +2664,9 @@ if CONTROL_BOT_TOKEN:
             text += f"  📍 {area if area else 'አልተዘጋጀም'}\n"
             text += f"  🆔 #{store_id}\n\n"
         
-        control_bot.reply_to(message, text)
+        control_bot.reply_to(message, text, reply_markup=get_control_main_menu("am"))
 
-    @control_bot.message_handler(func=lambda m: m.text == "🔍 ሱቆችን ፈልግ")
+    @control_bot.message_handler(func=lambda m: m.text == CONTROL_STRINGS["am"]["search"] or m.text == CONTROL_STRINGS["en"]["search"])
     def search_stores_control(message):
         chat_id = message.chat.id
         
@@ -2717,7 +2709,7 @@ if CONTROL_BOT_TOKEN:
             put_conn(conn)
         
         if not stores:
-            control_bot.reply_to(message, "🔍 ምንም ሱቅ አልተገኘም")
+            control_bot.reply_to(message, "🔍 ምንም ሱቅ አልተገኘም", reply_markup=get_control_main_menu("am"))
             return
         
         text = "🔍 **የተገኙ ሱቆች:**\n\n"
@@ -2727,7 +2719,7 @@ if CONTROL_BOT_TOKEN:
             text += f"  👤 @{username if username else 'ስም'}\n"
             text += f"  📍 {area if area else 'አልተዘጋጀም'}\n\n"
         
-        control_bot.reply_to(message, text)
+        control_bot.reply_to(message, text, reply_markup=get_control_main_menu("am"))
 
     @control_bot.message_handler(content_types=['location'])
     def handle_control_location_search(message):
@@ -2750,7 +2742,7 @@ if CONTROL_BOT_TOKEN:
             put_conn(conn)
         
         if not stores:
-            control_bot.reply_to(message, "🔍 በአቅራቢያ ምንም ሱቅ አልተገኘም")
+            control_bot.reply_to(message, "🔍 በአቅራቢያ ምንም ሱቅ አልተገኘም", reply_markup=get_control_main_menu("am"))
             return
         
         text = "📍 **በአቅራቢያ ያሉ ሱቆች:**\n\n"
@@ -2760,9 +2752,9 @@ if CONTROL_BOT_TOKEN:
             text += f"  👤 @{username if username else 'ስም'}\n"
             text += f"  📍 {area if area else 'አልተዘጋጀም'}\n\n"
         
-        control_bot.reply_to(message, text)
+        control_bot.reply_to(message, text, reply_markup=get_control_main_menu("am"))
 
-    @control_bot.message_handler(func=lambda m: m.text == "❓ እርዳታ")
+    @control_bot.message_handler(func=lambda m: m.text == CONTROL_STRINGS["am"]["help"] or m.text == CONTROL_STRINGS["en"]["help"])
     def control_help_btn(message):
         control_help(message)
 
