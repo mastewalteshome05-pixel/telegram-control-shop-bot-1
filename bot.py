@@ -83,9 +83,6 @@ def put_conn(conn):
         except:
             pass
 
-# ============================================================
-# 3.1 FIXED: init_db() - Categories table without token column
-# ============================================================
 def init_db():
     conn = get_safe_connection()
     try:
@@ -217,40 +214,22 @@ def init_db():
                                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
             # ============================================================
-            # FIXED: Categories table - Drop and recreate without token column
+            # FIXED: Categories table - SIMPLE version without UNIQUE constraint issues
             # ============================================================
-            # First, check if categories table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables 
-                    WHERE table_name = 'categories'
-                )
-            """)
-            table_exists = cursor.fetchone()[0]
+            # Drop old categories table if it exists
+            cursor.execute("DROP TABLE IF EXISTS categories CASCADE")
             
-            if table_exists:
-                # Check if token column exists
-                cursor.execute("""
-                    SELECT column_name FROM information_schema.columns 
-                    WHERE table_name='categories' AND column_name='token'
-                """)
-                has_token = cursor.fetchone()
-                
-                if has_token:
-                    # Drop the token column
-                    cursor.execute("ALTER TABLE categories DROP COLUMN token")
-                    print("✅ Removed token column from categories")
-            else:
-                # Create fresh categories table
-                cursor.execute('''CREATE TABLE categories (
-                                    id SERIAL PRIMARY KEY,
-                                    name_am TEXT UNIQUE,
-                                    name_en TEXT,
-                                    icon TEXT,
-                                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-                print("✅ Created categories table")
+            # Create fresh categories table
+            cursor.execute('''CREATE TABLE categories (
+                                id SERIAL PRIMARY KEY,
+                                name_am TEXT,
+                                name_en TEXT,
+                                icon TEXT,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
+            print("✅ Categories table created")
 
-            # Insert default categories
+            # Insert default categories - using simple INSERT without ON CONFLICT
             cursor.execute('''INSERT INTO categories (name_am, name_en, icon) VALUES 
                               ('ሁሉም', 'All', '📋'),
                               ('ልብስ', 'Fashion', '👗'),
@@ -262,8 +241,7 @@ def init_db():
                               ('ቤት', 'Home', '🏠'),
                               ('ስፖርት', 'Sports', '⚽'),
                               ('መኪና', 'Cars', '🚗'),
-                              ('ጨዋታ', 'Games', '🎮')
-                              ON CONFLICT (name_am) DO NOTHING''')
+                              ('ጨዋታ', 'Games', '🎮')''')
             
             conn.commit()
             print("✅ Database initialized successfully!")
@@ -426,33 +404,43 @@ if CONTROL_BOT_TOKEN:
         return markup
 
     # ============================================================
-    # 5.3 START
+    # 5.3 START - FIXED
     # ============================================================
     @bot.message_handler(commands=['start'])
     def start_message(message):
         chat_id = message.chat.id
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="lang_am"),
-            types.InlineKeyboardButton("English 🇬🇧", callback_data="lang_en")
-        )
-        bot.send_message(
-            chat_id,
-            "🌍 **ቋንቋ ይምረጡ / Select Language**",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        try:
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="lang_am"),
+                types.InlineKeyboardButton("English 🇬🇧", callback_data="lang_en")
+            )
+            bot.send_message(
+                chat_id,
+                "🌍 **ቋንቋ ይምረጡ / Select Language**\n\n👋 እንኳን ወደ EthioSuq ገበያ በደህና መጡ!",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            print(f"✅ /start sent to {chat_id}")
+        except Exception as e:
+            print(f"❌ Error in start: {e}")
+            bot.send_message(chat_id, "❌ ስህተት ተከስቷል። እባክዎ ቆይተው ይሞክሩ።")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("lang_"))
     def set_language(call):
         chat_id = call.message.chat.id
         lang = call.data.split("_")[1]
-        set_user_lang(chat_id, lang)
-        bot.delete_message(chat_id, call.message.message_id)
-        
-        welcome = "👋 **እንኳን ወደ EthioSuq ገበያ በደህና መጡ!**\n\nእባክዎ ከታች ካሉት አማራጮች ይምረጡ:" if lang == "am" else "👋 **Welcome to EthioSuq Marketplace!**\n\nPlease choose from the options below:"
-        bot.send_message(chat_id, welcome, reply_markup=get_main_menu(), parse_mode="Markdown")
-        bot.answer_callback_query(call.id)
+        try:
+            set_user_lang(chat_id, lang)
+            bot.delete_message(chat_id, call.message.message_id)
+            
+            welcome = "👋 **እንኳን ወደ EthioSuq ገበያ በደህና መጡ!**\n\nእባክዎ ከታች ካሉት አማራጮች ይምረጡ:" if lang == "am" else "👋 **Welcome to EthioSuq Marketplace!**\n\nPlease choose from the options below:"
+            bot.send_message(chat_id, welcome, reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            print(f"✅ Language set to {lang} for {chat_id}")
+        except Exception as e:
+            print(f"❌ Error in set_language: {e}")
+            bot.answer_callback_query(call.id, "❌ Error occurred")
 
     # ============================================================
     # 5.4 SUPER ADMIN LOGIN
@@ -603,27 +591,23 @@ if CONTROL_BOT_TOKEN:
             
             markup = types.InlineKeyboardMarkup(row_width=2)
             
-            # Approval buttons
             if is_approved == 0:
                 markup.add(
                     types.InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_store_{store_id}"),
                     types.InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_store_{store_id}")
                 )
             
-            # Active/Block buttons
             if is_active == 1:
                 markup.add(types.InlineKeyboardButton("🔴 Block", callback_data=f"admin_block_store_{store_id}"))
             else:
                 markup.add(types.InlineKeyboardButton("🟢 Activate", callback_data=f"admin_activate_store_{store_id}"))
             
-            # View buttons
             markup.add(
                 types.InlineKeyboardButton("📦 Products", callback_data=f"admin_products_{store_id}"),
                 types.InlineKeyboardButton("📬 Orders", callback_data=f"admin_orders_{store_id}")
             )
             markup.add(types.InlineKeyboardButton("📊 Stats", callback_data=f"admin_stats_{store_id}"))
             
-            # Visit store
             if username:
                 markup.add(types.InlineKeyboardButton("🛍️ Visit", url=f"https://t.me/{username}"))
             
@@ -1113,7 +1097,6 @@ if CONTROL_BOT_TOKEN:
         reg_wizard_states[chat_id]["data"]["shop_lat"] = message.location.latitude
         reg_wizard_states[chat_id]["data"]["shop_lng"] = message.location.longitude
         
-        # Get categories
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
@@ -1478,18 +1461,23 @@ if CONTROL_BOT_TOKEN:
         )
 
     # ============================================================
-    # 5.13 START BOT
+    # 5.13 START BOT - FIXED
     # ============================================================
     def _run_bot():
+        print("🚀 Starting EthioSuq bot polling...")
         while True:
             try:
-                bot.infinity_polling(skip_pending=True, timeout=30)
+                bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=30)
+                print("✅ Bot polling running...")
             except Exception as e:
-                print(f"⚠️ EthioSuq bot crashed: {e}. Restarting in 5s...")
+                print(f"⚠️ Bot crashed: {e}")
+                print("🔄 Restarting in 5 seconds...")
                 time.sleep(5)
 
+    # Start the bot
+    print("✅ EthioSuq Bot is starting...")
     threading.Thread(target=_run_bot, name="EthioSuqBot", daemon=True).start()
-    print("✅ EthioSuq Bot is running!")
+    print("✅ EthioSuq Bot thread started!")
 
 else:
     print("⚠️ CONTROL_BOT_TOKEN not set!")
@@ -1497,5 +1485,6 @@ else:
 # ============================================================
 # 6. MAIN LOOP
 # ============================================================
+print("✅ EthioSuq system is running!")
 while True:
     time.sleep(3600)
