@@ -4,6 +4,7 @@ import hashlib
 import secrets
 import time
 import math
+import re
 import telebot
 from telebot import types, apihelper
 import google.generativeai as genai
@@ -117,12 +118,10 @@ def init_db():
                                 token TEXT,
                                 name_am TEXT,
                                 name_en TEXT,
-                                name_or TEXT,
                                 price REAL,
                                 stock INTEGER,
                                 desc_am TEXT,
                                 desc_en TEXT,
-                                desc_or TEXT,
                                 image_url TEXT,
                                 category TEXT,
                                 discount_percent INTEGER DEFAULT 0,
@@ -136,7 +135,6 @@ def init_db():
                                 customer_id BIGINT,
                                 status_am TEXT,
                                 status_en TEXT,
-                                status_or TEXT,
                                 total_price REAL,
                                 delivery_fee REAL DEFAULT 0,
                                 status_stage INTEGER DEFAULT 0,
@@ -191,7 +189,7 @@ def init_db():
                                 comment TEXT,
                                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
-            # Promo codes / Coupons
+            # Coupons
             cursor.execute('''CREATE TABLE IF NOT EXISTS coupons (
                                 id SERIAL PRIMARY KEY,
                                 code TEXT UNIQUE,
@@ -200,7 +198,7 @@ def init_db():
                                 used_by BIGINT[] DEFAULT '{}',
                                 store_token TEXT)''')
 
-            # User points / Rewards
+            # User points
             cursor.execute('''CREATE TABLE IF NOT EXISTS user_points (
                                 chat_id BIGINT PRIMARY KEY,
                                 points INTEGER DEFAULT 0,
@@ -215,6 +213,27 @@ def init_db():
                                 is_read INTEGER DEFAULT 0,
                                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
+            # Store categories
+            cursor.execute('''CREATE TABLE IF NOT EXISTS categories (
+                                id SERIAL PRIMARY KEY,
+                                name_am TEXT,
+                                name_en TEXT,
+                                icon TEXT)''')
+
+            # Insert default categories
+            cursor.execute('''INSERT INTO categories (name_am, name_en, icon) VALUES 
+                              ('ሁሉም', 'All', '📋'),
+                              ('ልብስ', 'Fashion', '👗'),
+                              ('ጫማ', 'Shoes', '👟'),
+                              ('ሞባይል', 'Mobile', '📱'),
+                              ('ኤሌክትሮኒክስ', 'Electronics', '💻'),
+                              ('ውበት', 'Beauty', '💄'),
+                              ('ምግብ', 'Food', '🍕'),
+                              ('ቤት', 'Home', '🏠'),
+                              ('ስፖርት', 'Sports', '⚽'),
+                              ('መኪና', 'Cars', '🚗'),
+                              ('ጨዋታ', 'Games', '🎮')
+                              ON CONFLICT DO NOTHING''')
             conn.commit()
     finally:
         put_conn(conn)
@@ -244,170 +263,49 @@ PER_KM_RATE = 8
 def calculate_delivery_fee(distance_km):
     return round(BASE_DELIVERY_FEE + (distance_km * PER_KM_RATE), 2)
 
-ORDER_STAGES = {
-    "am": ["🟡 በመጠባበቅ ላይ", "✅ ተረጋግጧል", "🚚 በመንገድ ላይ", "📦 ደርሷል"],
-    "en": ["🟡 Pending", "✅ Confirmed", "🚚 On the way", "📦 Delivered"],
-    "or": ["🟡 Eegamaa", "✅ Mirkanaa'e", "🚚 Karaa irra", "📦 Gahe"]
-}
+ORDER_STAGES_AM = ["🟡 በመጠባበቅ ላይ", "✅ ተረጋግጧል", "🚚 በመንገድ ላይ", "📦 ደርሷል"]
+ORDER_STAGES_EN = ["🟡 Pending", "✅ Confirmed", "🚚 On the way", "📦 Delivered"]
+
+def get_customer_info(chat_id):
+    conn = get_safe_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT phone, lat, lng FROM customer_info WHERE chat_id=%s", (chat_id,))
+            row = cursor.fetchone()
+    finally:
+        put_conn(conn)
+    if row:
+        return {"phone": row[0], "lat": row[1], "lng": row[2]}
+    return None
+
+def save_customer_phone(chat_id, phone):
+    conn = get_safe_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''INSERT INTO customer_info (chat_id, phone) VALUES (%s, %s)
+                              ON CONFLICT (chat_id) DO UPDATE SET phone = EXCLUDED.phone''', (chat_id, phone))
+            conn.commit()
+    finally:
+        put_conn(conn)
+
+def save_customer_location(chat_id, lat, lng):
+    conn = get_safe_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''INSERT INTO customer_info (chat_id, lat, lng) VALUES (%s, %s, %s)
+                              ON CONFLICT (chat_id) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng''', (chat_id, lat, lng))
+            conn.commit()
+    finally:
+        put_conn(conn)
+
+def is_valid_phone(phone):
+    return bool(re.match(r'^[0-9]{10}$', phone))
+
+def is_valid_password(password):
+    return len(password) >= 6
 
 # ============================================================
-# 5. MULTI-LANGUAGE SUPPORT - Amharic, Oromo, English
-# ============================================================
-STRINGS = {
-    "am": {
-        "welcome": "እንኳን ወደ EthioSuq - የኢትዮጵያ ገበያ በደህና መጡ! 👋",
-        "explore_stores": "🏪 ሱቆችን አስስ",
-        "ai_search": "🔍 AI ፍለጋ",
-        "trending": "🔥 ተወዳጅ ምርቶች",
-        "deals": "🎁 ቅናሾች",
-        "cart": "🛒 ጋሪዬ",
-        "orders": "📦 ትዕዛዞቼ",
-        "favorites": "❤️ ተወዳጆች",
-        "reviews": "⭐ ግምገማዎች",
-        "register_store": "➕ ሱቅ መዝግብ",
-        "profile": "👤 መገለጫዬ",
-        "notifications": "🔔 ማስታወቂያዎች",
-        "support": "📞 ድጋፍ",
-        "coupons": "🎟 ኩፖኖች",
-        "rewards": "🎯 ሽልማቶች",
-        "empty_cart": "🛒 ጋሪዎ ባዶ ነው",
-        "added_to_cart": "✅ ወደ ጋሪ ተጨምሯል",
-        "checkout": "💳 ሂሳብ አስተካክል",
-        "total": "አጠቃላይ",
-        "price": "ዋጋ",
-        "stock": "ክምችት",
-        "in_stock": "✅ አለ",
-        "out_of_stock": "❌ የለም",
-        "phone_share": "📱 ስልክ ቁጥሬን አጋራ",
-        "location_share": "📍 አካባቢዬን አጋራ",
-        "phone_required": "📱 እባክዎ ስልክ ቁጥርዎን ያጋሩ",
-        "location_required": "📍 እባክዎ አካባቢዎን ያጋሩ",
-        "phone_saved": "✅ ስልክ ቁጥርዎ ተቀምጧል",
-        "location_saved": "✅ አካባቢዎ ተቀምጧል",
-        "order_placed": "✅ ትዕዛዝዎ ተላኩልናል!",
-        "order_id": "🆔 የትዕዛዝ ቁጥር",
-        "delivery_fee": "🚚 የማድረሻ ዋጋ",
-        "grand_total": "💰 አጠቃላይ የሚከፈል",
-        "receipt_prompt": "📸 የክፍያ ደረሰኝ ይላኩ",
-        "categories": ["ሁሉም", "ኤሌክትሮኒክስ", "ልብስ", "ውበት", "ምግብ", "ቤት", "ስፖርት"],
-        "trending_title": "🔥 በዛሬው ቀን ተወዳጅ ምርቶች",
-        "deals_title": "🎁 ልዩ ቅናሾች እና ፕሮሞሽኖች",
-        "no_stores": "🏪 ምንም የተመዘገበ ሱቅ የለም",
-        "no_products": "📦 ምንም ምርት የለም",
-        "pending_orders": "🟡 በመጠባበቅ ላይ",
-        "delivered_orders": "📦 የደረሱ",
-        "cancelled_orders": "❌ የተሰረዙ",
-        "search_prompt": "🔍 ምን ይፈልጋሉ?",
-        "coupon_title": "🎟 የእኔ ኩፖኖች",
-        "rewards_title": "🎯 የእኔ ሽልማቶች",
-        "points": "ነጥቦች",
-        "no_coupons": "ምንም ኩፖን የለም",
-        "no_rewards": "ምንም ሽልማት የለም"
-    },
-    "or": {
-        "welcome": "EthioSuq - Gabaa Itoophiyaatti baga nagaan dhufte! 👋",
-        "explore_stores": "🏪 Dukaaneen",
-        "ai_search": "🔍 AI Barbaadaa",
-        "trending": "🔥 Oomishaalee beekamoo",
-        "deals": "🎁 Gatii qabsiisa",
-        "cart": "🛒 Kaartii koo",
-        "orders": "📦 Ajajawwan koo",
-        "favorites": "❤️ Jaallatamoo",
-        "reviews": "⭐ Madaallii",
-        "register_store": "➕ Dukaana galmeessuu",
-        "profile": "👤 Pr'oofayilii koo",
-        "notifications": "🔔 Beeksisaa",
-        "support": "📞 Gargaarsa",
-        "coupons": "🎟 Kuupoonii",
-        "rewards": "🎯 Badhaasa",
-        "empty_cart": "🛒 Kaartiin kee duwwaa dha",
-        "added_to_cart": "✅ Kaartii keessatti dabale",
-        "checkout": "💳 Kaffaltii",
-        "total": "Walumaa galatti",
-        "price": "Gatii",
-        "stock": "Kumsi",
-        "in_stock": "✅ Jira",
-        "out_of_stock": "❌ Hin jiru",
-        "phone_share": "📱 Lakkoobsa bilbilaa koo qoodhu",
-        "location_share": "📍 iddoo koo qoodhu",
-        "phone_required": "📱 Lakkoobsa bilbilaa keessan qoodhaa",
-        "location_required": "📍 Iddoo keessan qoodhaa",
-        "phone_saved": "✅ Lakkoobsi bilbilaa keessan qabameera",
-        "location_saved": "✅ Iddoon keessan qabameera",
-        "order_placed": "✅ Ajajni keessan ergameera!",
-        "order_id": "🆔 Lakkoobsa ajaja",
-        "delivery_fee": "🚚 Gatii naannoo",
-        "grand_total": "💰 Walumaa galatti kaffaltii",
-        "receipt_prompt": "📸 Rasiidii kaffaltii ergaa",
-        "categories": ["Hunda", "Elek'irooniks", "Uffata", "Miidhagina", "Nyaata", "Mana", "Isporti"],
-        "trending_title": "🔥 Oomishaaleen har'aa beekamoo",
-        "deals_title": "🎁 Gatii qabsiisa addaa",
-        "no_stores": "🏪 Dukaan tokko iyyuu hin galmeessine",
-        "no_products": "📦 Oomisha tokko iyyuu hin jiru",
-        "pending_orders": "🟡 Eegamaa",
-        "delivered_orders": "📦 Gahe",
-        "cancelled_orders": "❌ Haqame",
-        "search_prompt": "🔍 Maal barbaadda?",
-        "coupon_title": "🎟 Kuupoonii koo",
-        "rewards_title": "🎯 Badhaasa koo",
-        "points": "P'uuntii",
-        "no_coupons": "Kuupoonii tokko iyyuu hin jiru",
-        "no_rewards": "Badhaasa tokko iyyuu hin jiru"
-    },
-    "en": {
-        "welcome": "Welcome to EthioSuq - Ethiopia's Marketplace! 👋",
-        "explore_stores": "🏪 Explore Stores",
-        "ai_search": "🔍 AI Search",
-        "trending": "🔥 Trending Products",
-        "deals": "🎁 Deals & Offers",
-        "cart": "🛒 My Cart",
-        "orders": "📦 My Orders",
-        "favorites": "❤️ Favorites",
-        "reviews": "⭐ Reviews",
-        "register_store": "➕ Register Store",
-        "profile": "👤 My Profile",
-        "notifications": "🔔 Notifications",
-        "support": "📞 Support",
-        "coupons": "🎟 Coupons",
-        "rewards": "🎯 Rewards",
-        "empty_cart": "🛒 Your cart is empty",
-        "added_to_cart": "✅ Added to cart",
-        "checkout": "💳 Checkout",
-        "total": "Total",
-        "price": "Price",
-        "stock": "Stock",
-        "in_stock": "✅ In Stock",
-        "out_of_stock": "❌ Out of Stock",
-        "phone_share": "📱 Share My Phone",
-        "location_share": "📍 Share My Location",
-        "phone_required": "📱 Please share your phone number",
-        "location_required": "📍 Please share your location",
-        "phone_saved": "✅ Phone number saved",
-        "location_saved": "✅ Location saved",
-        "order_placed": "✅ Order placed!",
-        "order_id": "🆔 Order ID",
-        "delivery_fee": "🚚 Delivery Fee",
-        "grand_total": "💰 Grand Total",
-        "receipt_prompt": "📸 Send payment receipt",
-        "categories": ["All", "Electronics", "Fashion", "Beauty", "Food", "Home", "Sports"],
-        "trending_title": "🔥 Today's Trending Products",
-        "deals_title": "🎁 Special Deals & Promotions",
-        "no_stores": "🏪 No stores registered",
-        "no_products": "📦 No products available",
-        "pending_orders": "🟡 Pending",
-        "delivered_orders": "📦 Delivered",
-        "cancelled_orders": "❌ Cancelled",
-        "search_prompt": "🔍 What are you looking for?",
-        "coupon_title": "🎟 My Coupons",
-        "rewards_title": "🎯 My Rewards",
-        "points": "Points",
-        "no_coupons": "No coupons available",
-        "no_rewards": "No rewards yet"
-    }
-}
-
-# ============================================================
-# 6. ETHIOSUQ MARKETPLACE BOT
+# 5. ETHIOSUQ MAIN BOT
 # ============================================================
 CONTROL_BOT_TOKEN = os.environ.get("CONTROL_BOT_TOKEN")
 
@@ -425,9 +323,16 @@ if CONTROL_BOT_TOKEN:
     reg_wizard_states = {}
     login_attempts = {}
     lang_cache = {}
+    super_admin_sessions = {}
+    super_login_attempts = {}
+
+    # Super Admin config
+    SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
+    SUPER_ADMIN_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD")
+    SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "@support")
 
     # ============================================================
-    # 6.1 LANGUAGE SELECTION
+    # 5.1 LANGUAGE
     # ============================================================
     def get_user_lang(chat_id):
         if chat_id in lang_cache:
@@ -454,51 +359,49 @@ if CONTROL_BOT_TOKEN:
         finally:
             put_conn(conn)
 
+    def is_super_admin(chat_id):
+        return chat_id in super_admin_sessions and time.time() < super_admin_sessions[chat_id]
+
     # ============================================================
-    # 6.2 MAIN MENU
+    # 5.2 MAIN MENU (3 BUTTONS)
     # ============================================================
-    def get_main_menu(lang):
-        s = STRINGS[lang]
+    def get_main_menu():
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+        markup.add(
+            types.KeyboardButton("📝 መዝገብ ማእከል"),
+            types.KeyboardButton("🤖 AI ፍለጋ"),
+            types.KeyboardButton("💬 እርዳታ ማእከል")
+        )
+        return markup
+
+    def get_super_admin_menu():
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         markup.add(
-            types.KeyboardButton(s["explore_stores"]),
-            types.KeyboardButton(s["ai_search"]),
-            types.KeyboardButton(s["trending"]),
-            types.KeyboardButton(s["deals"])
-        )
-        markup.add(
-            types.KeyboardButton(s["cart"]),
-            types.KeyboardButton(s["orders"]),
-            types.KeyboardButton(s["favorites"]),
-            types.KeyboardButton(s["reviews"])
-        )
-        markup.add(
-            types.KeyboardButton(s["register_store"]),
-            types.KeyboardButton(s["profile"]),
-            types.KeyboardButton(s["notifications"]),
-            types.KeyboardButton(s["support"])
-        )
-        markup.add(
-            types.KeyboardButton(s["coupons"]),
-            types.KeyboardButton(s["rewards"])
+            types.KeyboardButton("📊 ዳሽቦርድ"),
+            types.KeyboardButton("🏪 ሁሉም ሱቆች"),
+            types.KeyboardButton("🛡 ለማጽደቅ የቆሙ"),
+            types.KeyboardButton("📦 ሁሉም ትዕዛዞች"),
+            types.KeyboardButton("💰 ገቢ"),
+            types.KeyboardButton("👥 ተጠቃሚዎች"),
+            types.KeyboardButton("📢 መልዕክት ላክ"),
+            types.KeyboardButton("🚪 ውጣ")
         )
         return markup
 
     # ============================================================
-    # 6.3 START / LANGUAGE
+    # 5.3 START
     # ============================================================
     @bot.message_handler(commands=['start'])
     def start_message(message):
         chat_id = message.chat.id
-        markup = types.InlineKeyboardMarkup(row_width=3)
+        markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="lang_am"),
-            types.InlineKeyboardButton("Afaan Oromoo 🇪🇹", callback_data="lang_or"),
             types.InlineKeyboardButton("English 🇬🇧", callback_data="lang_en")
         )
         bot.send_message(
             chat_id,
-            "🌍 **ቋንቋ ይምረጡ / Afaan filadhu / Select Language**",
+            "🌍 **ቋንቋ ይምረጡ / Select Language**",
             reply_markup=markup,
             parse_mode="Markdown"
         )
@@ -509,745 +412,812 @@ if CONTROL_BOT_TOKEN:
         lang = call.data.split("_")[1]
         set_user_lang(chat_id, lang)
         bot.delete_message(chat_id, call.message.message_id)
-        bot.send_message(chat_id, STRINGS[lang]["welcome"], reply_markup=get_main_menu(lang))
+        
+        welcome = "👋 **እንኳን ወደ EthioSuq ገበያ በደህና መጡ!**\n\nእባክዎ ከታች ካሉት አማራጮች ይምረጡ:" if lang == "am" else "👋 **Welcome to EthioSuq Marketplace!**\n\nPlease choose from the options below:"
+        bot.send_message(chat_id, welcome, reply_markup=get_main_menu(), parse_mode="Markdown")
         bot.answer_callback_query(call.id)
 
     # ============================================================
-    # 6.4 EXPLORE STORES
+    # 5.4 SUPER ADMIN LOGIN
     # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["explore_stores"])
-    def explore_stores(message):
+    @bot.message_handler(commands=['superadmin'])
+    def super_auth_start(message):
         chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT id, store_name, category, area_text, shop_photo, rating, username FROM stores WHERE is_approved=1 AND is_active=1 ORDER BY rating DESC")
-                stores = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not stores:
-            bot.send_message(chat_id, STRINGS[lang]["no_stores"])
+        if not SUPER_ADMIN_PASSWORD:
+            bot.reply_to(message, "❌ SUPER_ADMIN_PASSWORD not set.")
             return
-        
-        # Category filter
-        categories = STRINGS[lang]["categories"]
-        markup = types.InlineKeyboardMarkup(row_width=3)
-        for cat in categories:
-            markup.add(types.InlineKeyboardButton(cat, callback_data=f"storecat_{cat}"))
-        
-        bot.send_message(chat_id, "📂 **Filter by Category:**", reply_markup=markup)
-        
-        for store_id, name, category, area, photo, rating, username in stores[:10]:
-            stars = "⭐" * int(rating) if rating else "⭐" * 0
-            text = f"🏪 **{name}**\n📂 {category or 'General'}\n📍 {area or 'Not specified'}\n{stars} ({rating or 0})\n"
-            markup = types.InlineKeyboardMarkup()
-            if username:
-                markup.add(types.InlineKeyboardButton("🛍️ Visit Store", url=f"https://t.me/{username}"))
-            markup.add(types.InlineKeyboardButton("❤️ Favorite", callback_data=f"favstore_{store_id}"))
-            
-            if photo:
-                try:
-                    bot.send_photo(chat_id, photo, caption=text, reply_markup=markup, parse_mode="Markdown")
-                except:
-                    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        if SUPER_ADMIN_ID != 0 and chat_id != SUPER_ADMIN_ID:
+            bot.reply_to(message, "❌ Unauthorized.")
+            return
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("storecat_"))
-    def filter_stores_by_category(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        category = call.data.split("_")[1]
-        
-        if category == "ሁሉም" or category == "Hunda" or category == "All":
-            category = None
-        
+        attempt = super_login_attempts.setdefault(chat_id, {"count": 0, "lockout_until": 0})
+        if time.time() < attempt["lockout_until"]:
+            remaining = int(attempt["lockout_until"] - time.time())
+            bot.reply_to(message, f"🔒 Locked! Try in {remaining}s.")
+            return
+
+        msg = bot.send_message(chat_id, "🔐 **Enter Super Admin Password:**", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_super_pass)
+
+    def process_super_pass(message):
+        chat_id = message.chat.id
+        attempt = super_login_attempts.setdefault(chat_id, {"count": 0, "lockout_until": 0})
+
+        if message.text == SUPER_ADMIN_PASSWORD:
+            super_admin_sessions[chat_id] = time.time() + 7200
+            super_login_attempts[chat_id] = {"count": 0, "lockout_until": 0}
+            bot.send_message(
+                chat_id,
+                "🔓 **Welcome Super Admin!**\n\nSelect an option:",
+                reply_markup=get_super_admin_menu(),
+                parse_mode="Markdown"
+            )
+        else:
+            attempt["count"] += 1
+            if attempt["count"] >= 5:
+                attempt["lockout_until"] = time.time() + 900
+                bot.send_message(chat_id, "❌ Locked for 15 minutes.")
+            else:
+                left = 5 - attempt["count"]
+                bot.send_message(chat_id, f"❌ Wrong password! {left} attempts remaining.")
+
+    # ============================================================
+    # 5.5 SUPER ADMIN - DASHBOARD
+    # ============================================================
+    @bot.message_handler(func=lambda m: is_super_admin(m.chat.id) and m.text in [
+        "📊 ዳሽቦርድ", "🏪 ሁሉም ሱቆች", "🛡 ለማጽደቅ የቆሙ",
+        "📦 ሁሉም ትዕዛዞች", "💰 ገቢ", "👥 ተጠቃሚዎች",
+        "📢 መልዕክት ላክ", "🚪 ውጣ"
+    ])
+    def handle_super_admin_actions(message):
+        chat_id = message.chat.id
+        text = message.text
+
+        if text == "📊 ዳሽቦርድ":
+            show_dashboard(chat_id)
+        elif text == "🏪 ሁሉም ሱቆች":
+            show_all_stores(chat_id)
+        elif text == "🛡 ለማጽደቅ የቆሙ":
+            show_pending_stores(chat_id)
+        elif text == "📦 ሁሉም ትዕዛዞች":
+            show_all_orders(chat_id)
+        elif text == "💰 ገቢ":
+            show_revenue(chat_id)
+        elif text == "👥 ተጠቃሚዎች":
+            show_users(chat_id)
+        elif text == "📢 መልዕክት ላክ":
+            broadcast_prompt(chat_id)
+        elif text == "🚪 ውጣ":
+            super_admin_sessions.pop(chat_id, None)
+            bot.send_message(chat_id, "🔒 Logged out.", reply_markup=get_main_menu())
+
+    def show_dashboard(chat_id):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                if category:
-                    cursor.execute("SELECT id, store_name, area_text, shop_photo, rating, username FROM stores WHERE is_approved=1 AND is_active=1 AND category=%s ORDER BY rating DESC", (category,))
-                else:
-                    cursor.execute("SELECT id, store_name, area_text, shop_photo, rating, username FROM stores WHERE is_approved=1 AND is_active=1 ORDER BY rating DESC")
+                cursor.execute("SELECT COUNT(*) FROM stores")
+                total_stores = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_approved=1 AND is_active=1")
+                active_stores = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_approved=0")
+                pending_stores = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM stores WHERE is_active=0")
+                blocked_stores = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM products")
+                total_products = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM orders")
+                total_orders = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*), COALESCE(SUM(total_price + COALESCE(delivery_fee,0)),0) FROM orders WHERE status_stage >= 1")
+                paid_orders, revenue = cursor.fetchone()
+                cursor.execute("SELECT COUNT(DISTINCT customer_id) FROM orders")
+                total_users = cursor.fetchone()[0]
+        finally:
+            put_conn(conn)
+
+        text = (
+            "📊 **Super Admin Dashboard**\n\n"
+            f"🏪 Total Stores: {total_stores}\n"
+            f"🟢 Active: {active_stores}\n"
+            f"🟡 Pending: {pending_stores}\n"
+            f"🔴 Blocked: {blocked_stores}\n"
+            f"📦 Products: {total_products}\n"
+            f"📦 Orders: {total_orders}\n"
+            f"✅ Paid: {paid_orders}\n"
+            f"💰 Revenue: {revenue} ETB\n"
+            f"👥 Users: {total_users}\n"
+            f"📅 {time.strftime('%Y-%m-%d %H:%M')}"
+        )
+        bot.send_message(chat_id, text, parse_mode="Markdown")
+
+    # ============================================================
+    # 5.6 SUPER ADMIN - ALL STORES
+    # ============================================================
+    def show_all_stores(chat_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute('''SELECT id, store_name, admin_id, username, owner_name, owner_phone, 
+                                  is_approved, is_active, category, rating, created_at, token
+                                  FROM stores ORDER BY id''')
                 stores = cursor.fetchall()
         finally:
             put_conn(conn)
-        
+
         if not stores:
-            bot.send_message(chat_id, STRINGS[lang]["no_stores"])
+            bot.send_message(chat_id, "🏪 No stores registered.")
             return
-        
-        for store_id, name, area, photo, rating, username in stores[:10]:
+
+        for store in stores:
+            store_id, name, admin_id, username, owner, phone, is_approved, is_active, category, rating, created, token = store
+            
+            status = "✅ Approved" if is_approved == 1 else "⏳ Pending"
+            active = "🟢 Active" if is_active == 1 else "🔴 Blocked"
             stars = "⭐" * int(rating) if rating else ""
-            text = f"🏪 **{name}**\n📍 {area or 'Not specified'}\n{stars}\n"
-            markup = types.InlineKeyboardMarkup()
+            
+            text = (
+                f"🏪 **#{store_id} {name}**\n"
+                f"👤 {owner}\n"
+                f"📱 {phone}\n"
+                f"🤖 @{username}\n"
+                f"📂 {category or 'General'}\n"
+                f"{stars}\n"
+                f"📌 {status} | {active}"
+            )
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            
+            # Approval buttons
+            if is_approved == 0:
+                markup.add(
+                    types.InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_store_{store_id}"),
+                    types.InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_store_{store_id}")
+                )
+            
+            # Active/Block buttons
+            if is_active == 1:
+                markup.add(types.InlineKeyboardButton("🔴 Block", callback_data=f"admin_block_store_{store_id}"))
+            else:
+                markup.add(types.InlineKeyboardButton("🟢 Activate", callback_data=f"admin_activate_store_{store_id}"))
+            
+            # View buttons
+            markup.add(
+                types.InlineKeyboardButton("📦 Products", callback_data=f"admin_products_{store_id}"),
+                types.InlineKeyboardButton("📬 Orders", callback_data=f"admin_orders_{store_id}")
+            )
+            markup.add(types.InlineKeyboardButton("📊 Stats", callback_data=f"admin_stats_{store_id}"))
+            
+            # Visit store
             if username:
                 markup.add(types.InlineKeyboardButton("🛍️ Visit", url=f"https://t.me/{username}"))
-            if photo:
-                try:
-                    bot.send_photo(chat_id, photo, caption=text, reply_markup=markup, parse_mode="Markdown")
-                except:
-                    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-        bot.answer_callback_query(call.id)
+            
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+            time.sleep(0.05)
+
+    def show_pending_stores(chat_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute('''SELECT id, store_name, admin_id, username, owner_name, owner_phone, 
+                                  category, created_at, token
+                                  FROM stores WHERE is_approved=0 ORDER BY id''')
+                stores = cursor.fetchall()
+        finally:
+            put_conn(conn)
+
+        if not stores:
+            bot.send_message(chat_id, "🛡 No pending stores.")
+            return
+
+        for store in stores:
+            store_id, name, admin_id, username, owner, phone, category, created, token = store
+            
+            text = (
+                f"🛡 **#{store_id} {name}**\n"
+                f"👤 {owner}\n"
+                f"📱 {phone}\n"
+                f"🤖 @{username}\n"
+                f"📂 {category or 'General'}\n"
+                f"📅 {created}"
+            )
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(
+                types.InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_store_{store_id}"),
+                types.InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_store_{store_id}")
+            )
+            
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+            time.sleep(0.05)
 
     # ============================================================
-    # 6.5 AI SEARCH
+    # 5.7 SUPER ADMIN - ORDERS
     # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["ai_search"])
-    def ai_search_prompt(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        msg = bot.send_message(chat_id, STRINGS[lang]["search_prompt"])
-        bot.register_next_step_handler(msg, ai_search_run)
+    def show_all_orders(chat_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute('''SELECT o.id, o.total_price, o.delivery_fee, o.status_stage, 
+                                  o.customer_id, o.created_at, s.store_name
+                                  FROM orders o JOIN stores s ON o.token = s.token
+                                  ORDER BY o.id DESC LIMIT 20''')
+                orders = cursor.fetchall()
+        finally:
+            put_conn(conn)
 
-    def ai_search_run(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        query = message.text.strip()
+        if not orders:
+            bot.send_message(chat_id, "📦 No orders.")
+            return
+
+        stages = ["🟡 Pending", "✅ Confirmed", "🚚 On the way", "📦 Delivered", "❌ Cancelled"]
         
-        # Use AI if available
-        if ai_model:
+        for order in orders:
+            order_id, total, fee, stage, customer, created, store_name = order
+            stage_label = stages[stage] if 0 <= stage <= 4 else "Unknown"
+            
+            text = (
+                f"🆔 **#{order_id}**\n"
+                f"🏪 {store_name}\n"
+                f"👤 {customer}\n"
+                f"💰 {total + (fee or 0)} ETB\n"
+                f"📌 {stage_label}\n"
+                f"📅 {created}"
+            )
+            
+            markup = types.InlineKeyboardMarkup()
+            if stage == 0:
+                markup.add(
+                    types.InlineKeyboardButton("✅ Confirm", callback_data=f"admin_confirm_order_{order_id}"),
+                    types.InlineKeyboardButton("❌ Cancel", callback_data=f"admin_cancel_order_{order_id}")
+                )
+            elif stage == 1:
+                markup.add(types.InlineKeyboardButton("🚚 Ship", callback_data=f"admin_ship_order_{order_id}"))
+            elif stage == 2:
+                markup.add(types.InlineKeyboardButton("📦 Deliver", callback_data=f"admin_deliver_order_{order_id}"))
+            
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+            time.sleep(0.05)
+
+    def show_revenue(chat_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute('''SELECT s.store_name, s.id, 
+                                  COUNT(o.id) as order_count,
+                                  COALESCE(SUM(o.total_price + COALESCE(o.delivery_fee,0)),0) as revenue,
+                                  COUNT(DISTINCT o.customer_id) as customers
+                                  FROM stores s 
+                                  LEFT JOIN orders o ON s.token = o.token AND o.status_stage >= 1
+                                  GROUP BY s.id, s.store_name
+                                  ORDER BY revenue DESC''')
+                reports = cursor.fetchall()
+        finally:
+            put_conn(conn)
+
+        if not reports:
+            bot.send_message(chat_id, "💰 No revenue data.")
+            return
+
+        total_revenue = sum(r[2] for r in reports)
+        
+        text = f"💰 **Revenue Report**\n\nTotal: {total_revenue} ETB\n\n"
+        
+        for store_name, store_id, order_count, revenue, customers in reports[:15]:
+            if revenue > 0:
+                text += f"🏪 **{store_name}**\n"
+                text += f"   📦 {order_count} orders\n"
+                text += f"   💰 {revenue} ETB\n"
+                text += f"   👥 {customers} customers\n\n"
+        
+        bot.send_message(chat_id, text, parse_mode="Markdown")
+
+    def show_users(chat_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute('''SELECT DISTINCT customer_id, COUNT(*) as orders, 
+                                  COALESCE(SUM(total_price + COALESCE(delivery_fee,0)),0) as spent
+                                  FROM orders GROUP BY customer_id 
+                                  ORDER BY orders DESC LIMIT 20''')
+                users = cursor.fetchall()
+                
+                cursor.execute("SELECT COUNT(DISTINCT customer_id) FROM orders")
+                total_users = cursor.fetchone()[0]
+        finally:
+            put_conn(conn)
+
+        text = f"👥 **Users**\n\nTotal: {total_users}\n\n"
+        
+        for user_id, orders, spent in users:
+            text += f"🆔 {user_id}\n"
+            text += f"   📦 {orders} orders\n"
+            text += f"   💰 {spent} ETB\n\n"
+        
+        bot.send_message(chat_id, text, parse_mode="Markdown")
+
+    def broadcast_prompt(chat_id):
+        msg = bot.send_message(chat_id, "📢 **Broadcast**\n\nEnter message:")
+        bot.register_next_step_handler(msg, send_broadcast)
+
+    def send_broadcast(message):
+        chat_id = message.chat.id
+        text = message.text
+        
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT DISTINCT customer_id FROM orders")
+                users = cursor.fetchall()
+        finally:
+            put_conn(conn)
+        
+        sent = 0
+        for (user_id,) in users:
             try:
-                bot.send_chat_action(chat_id, 'typing')
-                system_prompt = f"You are EthioSuq AI assistant. User asked: '{query}'. Search in Ethiopian marketplace context. Suggest products, stores, or deals in {lang}. Keep response concise and helpful."
-                response = ai_model.generate_content(system_prompt)
-                bot.reply_to(message, f"🤖 **AI Search Results:**\n\n{response.text[:500]}")
-                return
+                bot.send_message(user_id, f"📢 **Broadcast**\n\n{text}")
+                sent += 1
+                time.sleep(0.05)
             except:
                 pass
         
-        # Fallback: search in database
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT p.name_am, p.name_en, p.name_or, p.price, p.stock, p.image_url, s.store_name
-                                  FROM products p JOIN stores s ON p.token = s.token
-                                  WHERE s.is_approved=1 AND s.is_active=1 AND p.stock > 0
-                                  AND (p.name_am ILIKE %s OR p.name_en ILIKE %s OR p.name_or ILIKE %s OR p.desc_am ILIKE %s OR p.desc_en ILIKE %s OR p.desc_or ILIKE %s)
-                                  LIMIT 10''', (f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"))
-                results = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not results:
-            bot.reply_to(message, "🔍 No results found. Try a different search term.")
-            return
-        
-        for name_am, name_en, name_or, price, stock, image_url, store_name in results:
-            name = name_am if lang == "am" else name_or if lang == "or" else name_en
-            text = f"📦 **{name}**\n💰 {price} ETB\n🏪 {store_name}\n📌 {STRINGS[lang]['in_stock'] if stock > 0 else STRINGS[lang]['out_of_stock']}"
-            if image_url:
-                try:
-                    bot.send_photo(chat_id, image_url, caption=text, parse_mode="Markdown")
-                except:
-                    bot.send_message(chat_id, text, parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, text, parse_mode="Markdown")
+        bot.reply_to(message, f"✅ Sent to {sent} users.")
 
     # ============================================================
-    # 6.6 TRENDING PRODUCTS
+    # 5.8 SUPER ADMIN - CALLBACKS
     # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["trending"])
-    def trending_products(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT p.id, p.name_am, p.name_en, p.name_or, p.price, p.image_url, s.store_name, p.views
-                                  FROM products p JOIN stores s ON p.token = s.token
-                                  WHERE s.is_approved=1 AND s.is_active=1 AND p.stock > 0
-                                  ORDER BY p.views DESC, p.id DESC LIMIT 10''')
-                products = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not products:
-            bot.send_message(chat_id, STRINGS[lang]["no_products"])
-            return
-        
-        bot.send_message(chat_id, STRINGS[lang]["trending_title"], parse_mode="Markdown")
-        
-        for p_id, name_am, name_en, name_or, price, image_url, store_name, views in products:
-            name = name_am if lang == "am" else name_or if lang == "or" else name_en
-            text = f"📦 **{name}**\n💰 {price} ETB\n🏪 {store_name}\n👁️ {views} views"
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🛒 Add to Cart", callback_data=f"addprod_{p_id}"))
-            if image_url:
-                try:
-                    bot.send_photo(chat_id, image_url, caption=text, reply_markup=markup, parse_mode="Markdown")
-                except:
-                    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    # ============================================================
-    # 6.7 DEALS & OFFERS
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["deals"])
-    def deals_products(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT p.id, p.name_am, p.name_en, p.name_or, p.price, p.discount_percent, p.image_url, s.store_name
-                                  FROM products p JOIN stores s ON p.token = s.token
-                                  WHERE s.is_approved=1 AND s.is_active=1 AND p.stock > 0 AND p.discount_percent > 0
-                                  ORDER BY p.discount_percent DESC LIMIT 10''')
-                deals = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not deals:
-            bot.send_message(chat_id, "🎁 No deals available right now.")
-            return
-        
-        bot.send_message(chat_id, STRINGS[lang]["deals_title"], parse_mode="Markdown")
-        
-        for p_id, name_am, name_en, name_or, price, discount, image_url, store_name in deals:
-            name = name_am if lang == "am" else name_or if lang == "or" else name_en
-            discounted_price = price * (1 - discount / 100)
-            text = f"📦 **{name}**\n💰 ~~{price} ETB~~ → **{discounted_price:.0f} ETB** ({discount}% OFF)\n🏪 {store_name}"
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🛒 Add to Cart", callback_data=f"addprod_{p_id}"))
-            if image_url:
-                try:
-                    bot.send_photo(chat_id, image_url, caption=text, reply_markup=markup, parse_mode="Markdown")
-                except:
-                    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    # ============================================================
-    # 6.8 CART
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["cart"])
-    def show_cart(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        cart = user_carts.get(chat_id, {})
-        
-        if not cart:
-            bot.send_message(chat_id, STRINGS[lang]["empty_cart"])
-            return
-        
-        total = 0
-        text = "🛒 **Your Cart**\n\n"
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                for p_id, qty in list(cart.items()):
-                    cursor.execute("SELECT name_am, name_en, name_or, price, token FROM products WHERE id=%s", (p_id,))
-                    row = cursor.fetchone()
-                    if row:
-                        name_am, name_en, name_or, price, token = row
-                        name = name_am if lang == "am" else name_or if lang == "or" else name_en
-                        subtotal = price * qty
-                        total += subtotal
-                        text += f"▪️ {name} x {qty} = {subtotal} ETB\n"
-                    else:
-                        del cart[p_id]
-        finally:
-            put_conn(conn)
-        
-        text += f"\n💵 **{STRINGS[lang]['total']}: {total} ETB**"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton(STRINGS[lang]["checkout"], callback_data="checkout"),
-            types.InlineKeyboardButton("🗑️ Clear", callback_data="clear_cart")
-        )
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("addprod_"))
-    def add_to_cart_callback(call):
+    @bot.callback_query_handler(func=lambda call: is_super_admin(call.message.chat.id) and call.data.startswith("admin_"))
+    def handle_super_admin_callbacks(call):
         chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        p_id = int(call.data.split("_")[1])
+        data = call.data
+        parts = data.split("_")
+        action = parts[1]
         
+        if action == "approve_store":
+            store_id = int(parts[2])
+            approve_store(call, store_id)
+        elif action == "reject_store":
+            store_id = int(parts[2])
+            reject_store(call, store_id)
+        elif action == "block_store":
+            store_id = int(parts[2])
+            block_store(call, store_id)
+        elif action == "activate_store":
+            store_id = int(parts[2])
+            activate_store(call, store_id)
+        elif action == "products":
+            store_id = int(parts[2])
+            view_store_products(call, store_id)
+        elif action == "orders":
+            store_id = int(parts[2])
+            view_store_orders(call, store_id)
+        elif action == "stats":
+            store_id = int(parts[2])
+            view_store_stats(call, store_id)
+        elif action == "confirm_order":
+            order_id = int(parts[2])
+            confirm_order(call, order_id)
+        elif action == "cancel_order":
+            order_id = int(parts[2])
+            cancel_order(call, order_id)
+        elif action == "ship_order":
+            order_id = int(parts[2])
+            ship_order(call, order_id)
+        elif action == "deliver_order":
+            order_id = int(parts[2])
+            deliver_order(call, order_id)
+
+    def approve_store(call, store_id):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT stock FROM products WHERE id=%s", (p_id,))
-                row = cursor.fetchone()
-                if not row or row[0] <= 0:
-                    bot.answer_callback_query(call.id, "❌ Out of stock")
-                    return
-        finally:
-            put_conn(conn)
-        
-        if chat_id not in user_carts:
-            user_carts[chat_id] = {}
-        user_carts[chat_id][p_id] = user_carts[chat_id].get(p_id, 0) + 1
-        
-        bot.answer_callback_query(call.id, STRINGS[lang]["added_to_cart"])
-
-    @bot.callback_query_handler(func=lambda call: call.data == "clear_cart")
-    def clear_cart(call):
-        chat_id = call.message.chat.id
-        user_carts.pop(chat_id, None)
-        bot.edit_message_text("🛒 Cart cleared!", chat_id, call.message.message_id)
-        bot.answer_callback_query(call.id)
-
-    @bot.callback_query_handler(func=lambda call: call.data == "checkout")
-    def checkout_cart(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        cart = user_carts.get(chat_id, {})
-        
-        if not cart:
-            bot.answer_callback_query(call.id, "❌ Cart is empty")
-            return
-        
-        # Check if user has phone and location
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT phone, lat, lng FROM customer_info WHERE chat_id=%s", (chat_id,))
-                row = cursor.fetchone()
-        finally:
-            put_conn(conn)
-        
-        if not row or not row[0] or not row[1]:
-            # Request phone and location
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            if not row or not row[0]:
-                markup.add(types.KeyboardButton(STRINGS[lang]["phone_share"], request_contact=True))
-            if not row or not row[1]:
-                markup.add(types.KeyboardButton(STRINGS[lang]["location_share"], request_location=True))
-            bot.send_message(
-                chat_id,
-                f"📱 {STRINGS[lang]['phone_required']}\n📍 {STRINGS[lang]['location_required']}",
-                reply_markup=markup
-            )
-            admin_states[chat_id] = {"state": "PENDING_CHECKOUT"}
-            bot.answer_callback_query(call.id)
-            return
-        
-        # Proceed with checkout
-        finalize_checkout(chat_id, lang, call)
-
-    def finalize_checkout(chat_id, lang, call=None):
-        cart = user_carts.get(chat_id, {})
-        if not cart:
-            return
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT phone, lat, lng FROM customer_info WHERE chat_id=%s", (chat_id,))
-                cust_info = cursor.fetchone()
-                
-                items_total = 0
-                order_lines = []
-                
-                for p_id, qty in list(cart.items()):
-                    cursor.execute("SELECT price, stock, token FROM products WHERE id=%s FOR UPDATE", (p_id,))
-                    row = cursor.fetchone()
-                    if not row:
-                        continue
-                    price, stock, token = row
-                    buy_qty = min(qty, stock)
-                    if buy_qty <= 0:
-                        continue
-                    items_total += price * buy_qty
-                    order_lines.append((p_id, buy_qty, price, token))
-                
-                if not order_lines:
-                    conn.rollback()
-                    bot.send_message(chat_id, "❌ Some items are out of stock")
-                    return
-                
-                # Calculate delivery fee
-                delivery_fee = 0
-                dist_note = ""
-                if cust_info and cust_info[1] and cust_info[2]:
-                    store_token = order_lines[0][3]
-                    cursor.execute("SELECT shop_lat, shop_lng FROM stores WHERE token=%s", (store_token,))
-                    store_loc = cursor.fetchone()
-                    if store_loc and store_loc[0]:
-                        dist = calculate_distance_km(store_loc[0], store_loc[1], cust_info[1], cust_info[2])
-                        delivery_fee = calculate_delivery_fee(dist)
-                        dist_note = f"📏 {dist:.1f} km\n🚚 {delivery_fee} ETB\n"
-                
-                grand_total = items_total + delivery_fee
-                
-                cursor.execute('''INSERT INTO orders (token, customer_id, status_am, status_en, status_or, total_price, delivery_fee, status_stage)
-                                  VALUES (%s, %s, %s, %s, %s, %s, %s, 0) RETURNING id''',
-                               (order_lines[0][3], chat_id, ORDER_STAGES["am"][0], ORDER_STAGES["en"][0], ORDER_STAGES["or"][0], items_total, delivery_fee))
-                order_id = cursor.fetchone()[0]
-                
-                for p_id, buy_qty, price, token in order_lines:
-                    cursor.execute("INSERT INTO order_items (order_id, product_id, qty, price) VALUES (%s, %s, %s, %s)",
-                                   (order_id, p_id, buy_qty, price))
-                    cursor.execute("UPDATE products SET stock = stock - %s, views = views + 1 WHERE id=%s", (buy_qty, p_id))
-                
-                # Add points
-                points_earned = int(grand_total / 10)
-                cursor.execute('''INSERT INTO user_points (chat_id, points) VALUES (%s, %s)
-                                  ON CONFLICT (chat_id) DO UPDATE SET points = points + EXCLUDED.points''',
-                               (chat_id, points_earned))
-                
-                conn.commit()
-                
-                # Get store info for payment
-                cursor.execute("SELECT telebirr, cbebirr, store_name FROM stores WHERE token=%s", (order_lines[0][3],))
+                cursor.execute("SELECT token, store_name, admin_id, username FROM stores WHERE id=%s", (store_id,))
                 store = cursor.fetchone()
-                
+                if store:
+                    token, store_name, admin_id, username = store
+                    cursor.execute("UPDATE stores SET is_approved=1 WHERE id=%s", (store_id,))
+                    conn.commit()
+                    
+                    try:
+                        bot.send_message(admin_id, f"🎉 **Congratulations!**\n\nYour store '{store_name}' has been approved!\n\nYou can now manage your store at https://t.me/{username}")
+                    except:
+                        pass
+                    
+                    bot.answer_callback_query(call.id, "✅ Store approved!")
+                    bot.edit_message_text(f"{call.message.text}\n\n✅ **APPROVED!**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
         finally:
             put_conn(conn)
-        
-        user_carts.pop(chat_id, None)
-        
-        pay_text = f"🆔 **Order #{order_id}**\n\n💵 Items: {items_total} ETB\n{dist_note}💰 **Total: {grand_total} ETB**\n\n"
-        if store:
-            pay_text += f"📱 Telebirr: `{store[0]}`\n"
-            if store[1]:
-                pay_text += f"🏦 CBE Birr: `{store[1]}`\n"
-            pay_text += f"\n📸 {STRINGS[lang]['receipt_prompt']}"
-        
-        if call:
-            try:
-                bot.edit_message_text(pay_text, chat_id, call.message.message_id, parse_mode="Markdown")
-            except:
-                bot.send_message(chat_id, pay_text, parse_mode="Markdown")
-        else:
-            bot.send_message(chat_id, pay_text, parse_mode="Markdown")
-        
-        admin_states[chat_id] = {"state": f"AWAITING_RECEIPT_{order_id}"}
-        
-        # Create notification
+
+    def reject_store(call, store_id):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute('''INSERT INTO notifications (chat_id, title, message) VALUES (%s, %s, %s)''',
-                               (chat_id, "🛒 Order Placed", f"Your order #{order_id} has been placed successfully!"))
+                cursor.execute("SELECT store_name, admin_id FROM stores WHERE id=%s", (store_id,))
+                store = cursor.fetchone()
+                if store:
+                    store_name, admin_id = store
+                    cursor.execute("DELETE FROM stores WHERE id=%s", (store_id,))
+                    conn.commit()
+                    
+                    try:
+                        bot.send_message(admin_id, f"❌ **Store Rejected**\n\nYour store '{store_name}' has been rejected.")
+                    except:
+                        pass
+                    
+                    bot.answer_callback_query(call.id, "❌ Rejected!")
+                    bot.edit_message_text(f"{call.message.text}\n\n❌ **REJECTED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        finally:
+            put_conn(conn)
+
+    def block_store(call, store_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE stores SET is_active=0 WHERE id=%s", (store_id,))
                 conn.commit()
+            bot.answer_callback_query(call.id, "🔴 Blocked!")
+            bot.edit_message_text(f"{call.message.text}\n\n🔴 **BLOCKED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
         finally:
             put_conn(conn)
 
-    # ============================================================
-    # 6.9 ORDERS
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["orders"])
-    def show_orders(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
+    def activate_store(call, store_id):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute('''SELECT id, status_am, status_en, status_or, total_price, delivery_fee, status_stage, created_at
-                                  FROM orders WHERE customer_id=%s ORDER BY id DESC LIMIT 20''', (chat_id,))
-                orders = cursor.fetchall()
+                cursor.execute("UPDATE stores SET is_active=1 WHERE id=%s", (store_id,))
+                conn.commit()
+            bot.answer_callback_query(call.id, "🟢 Activated!")
+            bot.edit_message_text(f"{call.message.text}\n\n🟢 **ACTIVATED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
         finally:
             put_conn(conn)
-        
-        if not orders:
-            bot.send_message(chat_id, "📦 No orders found.")
-            return
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("🟡 Pending", callback_data="filter_pending"),
-            types.InlineKeyboardButton("📦 Delivered", callback_data="filter_delivered"),
-            types.InlineKeyboardButton("❌ Cancelled", callback_data="filter_cancelled")
-        )
-        bot.send_message(chat_id, "📦 **Filter Orders:**", reply_markup=markup)
-        
-        for order in orders:
-            order_id, status_am, status_en, status_or, total, fee, stage, created = order
-            status = status_am if lang == "am" else status_or if lang == "or" else status_en
-            stage_label = ORDER_STAGES[lang][stage] if 0 <= stage <= 3 else status
-            text = f"🆔 **#{order_id}**\n💵 {total + (fee or 0)} ETB\n📌 {stage_label}\n📅 {created}"
-            bot.send_message(chat_id, text, parse_mode="Markdown")
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("filter_"))
-    def filter_orders(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        filter_type = call.data.split("_")[1]
-        
-        stage_map = {
-            "pending": 0,
-            "delivered": 3,
-            "cancelled": -1
-        }
-        stage = stage_map.get(filter_type)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                if stage == -1:
-                    cursor.execute('''SELECT id, status_am, status_en, status_or, total_price, delivery_fee, status_stage, created_at
-                                      FROM orders WHERE customer_id=%s AND status_stage=-1 ORDER BY id DESC''', (chat_id,))
-                else:
-                    cursor.execute('''SELECT id, status_am, status_en, status_or, total_price, delivery_fee, status_stage, created_at
-                                      FROM orders WHERE customer_id=%s AND status_stage=%s ORDER BY id DESC''', (chat_id, stage))
-                orders = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not orders:
-            bot.send_message(chat_id, "📦 No orders in this category.")
-            return
-        
-        for order in orders:
-            order_id, status_am, status_en, status_or, total, fee, stage, created = order
-            status = status_am if lang == "am" else status_or if lang == "or" else status_en
-            stage_label = ORDER_STAGES[lang][stage] if 0 <= stage <= 3 else status
-            text = f"🆔 **#{order_id}**\n💵 {total + (fee or 0)} ETB\n📌 {stage_label}\n📅 {created}"
-            bot.send_message(chat_id, text, parse_mode="Markdown")
-        bot.answer_callback_query(call.id)
-
-    # ============================================================
-    # 6.10 FAVORITES
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["favorites"])
-    def show_favorites(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                # Product favorites
-                cursor.execute('''SELECT p.id, p.name_am, p.name_en, p.name_or, p.price, p.image_url, s.store_name
-                                  FROM favorites f JOIN products p ON f.product_id = p.id
-                                  JOIN stores s ON p.token = s.token
-                                  WHERE f.chat_id=%s AND s.is_active=1
-                                  ORDER BY f.created_at DESC LIMIT 10''', (chat_id,))
-                products = cursor.fetchall()
-                
-                # Store favorites
-                cursor.execute('''SELECT s.id, s.store_name, s.shop_photo, s.rating, s.username
-                                  FROM favorite_stores fs JOIN stores s ON fs.store_token = s.token
-                                  WHERE fs.chat_id=%s AND s.is_active=1''', (chat_id,))
-                stores = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not products and not stores:
-            bot.send_message(chat_id, "❤️ No favorites yet.")
-            return
-        
-        if products:
-            text = "📦 **Favorite Products:**\n\n"
-            for p_id, name_am, name_en, name_or, price, image_url, store_name in products:
-                name = name_am if lang == "am" else name_or if lang == "or" else name_en
-                text += f"▪️ {name} - {price} ETB ({store_name})\n"
-            bot.send_message(chat_id, text, parse_mode="Markdown")
-        
-        if stores:
-            text = "🏪 **Favorite Stores:**\n\n"
-            for store_id, name, photo, rating, username in stores:
-                stars = "⭐" * int(rating) if rating else ""
-                text += f"▪️ {name} {stars}\n"
-            bot.send_message(chat_id, text, parse_mode="Markdown")
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("favstore_"))
-    def favorite_store(call):
-        chat_id = call.message.chat.id
-        store_id = int(call.data.split("_")[1])
-        
+    def view_store_products(call, store_id):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT token FROM stores WHERE id=%s", (store_id,))
-                row = cursor.fetchone()
-                if row:
-                    cursor.execute('''INSERT INTO favorite_stores (chat_id, store_token) VALUES (%s, %s)
-                                      ON CONFLICT (chat_id, store_token) DO NOTHING''', (chat_id, row[0]))
-                    conn.commit()
+                store = cursor.fetchone()
+                if store:
+                    token = store[0]
+                    cursor.execute("SELECT id, name_am, name_en, price, stock, category FROM products WHERE token=%s ORDER BY id LIMIT 10", (token,))
+                    products = cursor.fetchall()
         finally:
             put_conn(conn)
-        bot.answer_callback_query(call.id, "❤️ Store added to favorites!")
-
-    # ============================================================
-    # 6.11 REVIEWS
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["reviews"])
-    def show_reviews(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
         
+        if not products:
+            bot.send_message(call.message.chat.id, "📦 No products.")
+            bot.answer_callback_query(call.id)
+            return
+        
+        text = f"📦 **Products ({len(products)})**\n\n"
+        for p_id, name_am, name_en, price, stock, category in products:
+            text += f"🆔 #{p_id} {name_am}\n"
+            text += f"   💰 {price} ETB | 📦 {stock}\n"
+            text += f"   📂 {category or 'General'}\n\n"
+        
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+
+    def view_store_orders(call, store_id):
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute('''SELECT r.id, r.rating, r.comment, r.created_at, s.store_name, p.name_am, p.name_en, p.name_or
-                                  FROM reviews r 
-                                  LEFT JOIN stores s ON r.token = s.token
-                                  LEFT JOIN products p ON r.product_id = p.id
-                                  WHERE r.chat_id=%s
-                                  ORDER BY r.created_at DESC LIMIT 10''', (chat_id,))
-                reviews = cursor.fetchall()
+                cursor.execute("SELECT token FROM stores WHERE id=%s", (store_id,))
+                store = cursor.fetchone()
+                if store:
+                    token = store[0]
+                    cursor.execute('''SELECT id, customer_id, total_price, delivery_fee, status_stage, created_at
+                                      FROM orders WHERE token=%s ORDER BY id DESC LIMIT 10''', (token,))
+                    orders = cursor.fetchall()
         finally:
             put_conn(conn)
         
-        if not reviews:
-            bot.send_message(chat_id, "⭐ No reviews yet.")
+        if not orders:
+            bot.send_message(call.message.chat.id, "📬 No orders.")
+            bot.answer_callback_query(call.id)
             return
         
-        text = "⭐ **Your Reviews:**\n\n"
-        for rev_id, rating, comment, created, store_name, p_am, p_en, p_or in reviews:
-            stars = "⭐" * rating
-            prod_name = p_am if lang == "am" else p_or if lang == "or" else p_en
-            text += f"🏪 {store_name or 'Unknown'}\n"
-            if prod_name:
-                text += f"📦 {prod_name}\n"
-            text += f"{stars}\n📝 {comment[:100] if comment else 'No comment'}\n📅 {created}\n\n"
+        stages = ["🟡 Pending", "✅ Confirmed", "🚚 On the way", "📦 Delivered", "❌ Cancelled"]
+        text = f"📬 **Orders**\n\n"
+        for order_id, customer, total, fee, stage, created in orders:
+            stage_label = stages[stage] if 0 <= stage <= 4 else "Unknown"
+            text += f"🆔 #{order_id} | 👤 {customer}\n"
+            text += f"   💰 {total + (fee or 0)} ETB | {stage_label}\n"
+            text += f"   📅 {created}\n\n"
         
-        bot.send_message(chat_id, text, parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+
+    def view_store_stats(call, store_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT token, store_name FROM stores WHERE id=%s", (store_id,))
+                store = cursor.fetchone()
+                if store:
+                    token, name = store
+                    cursor.execute("SELECT COUNT(*) FROM products WHERE token=%s", (token,))
+                    products = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*) FROM orders WHERE token=%s", (token,))
+                    orders = cursor.fetchone()[0]
+                    cursor.execute("SELECT COUNT(*), COALESCE(SUM(total_price + COALESCE(delivery_fee,0)),0) FROM orders WHERE token=%s AND status_stage >= 1", (token,))
+                    paid_orders, revenue = cursor.fetchone()
+                    cursor.execute("SELECT COUNT(DISTINCT customer_id) FROM orders WHERE token=%s", (token,))
+                    customers = cursor.fetchone()[0]
+        finally:
+            put_conn(conn)
+        
+        text = f"📊 **{name}**\n\n"
+        text += f"📦 Products: {products}\n"
+        text += f"📦 Orders: {orders}\n"
+        text += f"✅ Paid: {paid_orders}\n"
+        text += f"💰 Revenue: {revenue} ETB\n"
+        text += f"👥 Customers: {customers}\n"
+        
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+
+    def confirm_order(call, order_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE orders SET status_stage=1, status_am=%s, status_en=%s WHERE id=%s",
+                               (ORDER_STAGES_AM[1], ORDER_STAGES_EN[1], order_id))
+                conn.commit()
+            bot.answer_callback_query(call.id, "✅ Confirmed!")
+            bot.edit_message_text(f"{call.message.text}\n\n✅ **CONFIRMED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        finally:
+            put_conn(conn)
+
+    def cancel_order(call, order_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE orders SET status_stage=-1, status_am=%s, status_en=%s WHERE id=%s",
+                               ("❌ ተሰርዟል", "❌ Cancelled", order_id))
+                conn.commit()
+            bot.answer_callback_query(call.id, "❌ Cancelled!")
+            bot.edit_message_text(f"{call.message.text}\n\n❌ **CANCELLED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        finally:
+            put_conn(conn)
+
+    def ship_order(call, order_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE orders SET status_stage=2, status_am=%s, status_en=%s WHERE id=%s",
+                               (ORDER_STAGES_AM[2], ORDER_STAGES_EN[2], order_id))
+                conn.commit()
+            bot.answer_callback_query(call.id, "🚚 Shipped!")
+            bot.edit_message_text(f"{call.message.text}\n\n🚚 **SHIPPED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        finally:
+            put_conn(conn)
+
+    def deliver_order(call, order_id):
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE orders SET status_stage=3, status_am=%s, status_en=%s, delivered_at=NOW() WHERE id=%s",
+                               (ORDER_STAGES_AM[3], ORDER_STAGES_EN[3], order_id))
+                conn.commit()
+            bot.answer_callback_query(call.id, "📦 Delivered!")
+            bot.edit_message_text(f"{call.message.text}\n\n📦 **DELIVERED**", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        finally:
+            put_conn(conn)
 
     # ============================================================
-    # 6.12 REGISTER STORE (with phone & location buttons)
+    # 5.9 📝 መዝገብ ማእከል - REGISTER STORE (continued)
     # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["register_store"])
+    @bot.message_handler(func=lambda m: m.text == "📝 መዝገብ ማእከል")
     def register_wizard_start(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
         reg_wizard_states[chat_id] = {"data": {}}
         
-        msg = bot.send_message(chat_id, "🏪 **Step 1/7: Store Name**\n\nEnter store name:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id,
+            "🏪 **የሱቅ ስም ያስገቡ**\n\nለምሳሌ: ቴክ ሱቅ" if lang == "am" else "🏪 **Enter store name**\n\nExample: Tech Store",
+            parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, reg_w_store_name)
 
     def reg_w_store_name(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
         reg_wizard_states[chat_id]["data"]["store_name"] = message.text.strip()
-        msg = bot.send_message(chat_id, "👤 **Step 2/7: Owner Name**\n\nEnter your full name:", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, reg_w_owner_name)
-
-    def reg_w_owner_name(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        reg_wizard_states[chat_id]["data"]["owner_name"] = message.text.strip()
         
-        # Phone number with button
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add(types.KeyboardButton(STRINGS[lang]["phone_share"], request_contact=True))
-        msg = bot.send_message(chat_id, f"📱 **Step 3/7: Phone Number**\n\n{STRINGS[lang]['phone_required']}", reply_markup=markup, parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id,
+            "📱 **ስልክ ቁጥር ያስገቡ**\n\n⚠️ 10 አሃዝ ቁጥሮች ብቻ\n\nለምሳሌ: 0912345678" if lang == "am" else "📱 **Enter phone number**\n\n⚠️ 10 digits only\n\nExample: 0912345678",
+            parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, reg_w_phone)
 
     def reg_w_phone(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
+        phone = message.text.strip()
         
-        if message.contact:
-            phone = message.contact.phone_number
-        else:
-            phone = message.text.strip()
+        if not is_valid_phone(phone):
+            msg = bot.reply_to(
+                message,
+                "❌ **የተሳሳተ ስልክ ቁጥር!**\n\n10 አሃዝ ቁጥሮች ብቻ\n\nእንደገና ይሞክሩ:" if lang == "am" else "❌ **Invalid phone!**\n\n10 digits only.\n\nTry again:",
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, reg_w_phone)
+            return
         
         reg_wizard_states[chat_id]["data"]["owner_phone"] = phone
         
-        # Location with button
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.add(types.KeyboardButton(STRINGS[lang]["location_share"], request_location=True))
-        msg = bot.send_message(chat_id, f"📍 **Step 4/7: Location**\n\n{STRINGS[lang]['location_required']}", reply_markup=markup, parse_mode="Markdown")
+        markup.add(types.KeyboardButton("📍 አካባቢ አጋራ" if lang == "am" else "📍 Share Location", request_location=True))
+        msg = bot.send_message(
+            chat_id,
+            "📍 **አካባቢ ያጋሩ**\n\nከታች ያለውን አዝራር በመጫን ብቻ 👇" if lang == "am" else "📍 **Share location**\n\nUse the button below 👇",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, reg_w_location)
 
     def reg_w_location(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
-        data = reg_wizard_states[chat_id]["data"]
         
-        if message.location:
-            data["shop_lat"] = message.location.latitude
-            data["shop_lng"] = message.location.longitude
-            data["area_text"] = ""
-        else:
-            data["area_text"] = message.text.strip()
+        if not message.location:
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.add(types.KeyboardButton("📍 አካባቢ አጋራ" if lang == "am" else "📍 Share Location", request_location=True))
+            msg = bot.send_message(
+                chat_id,
+                "❌ **አካባቢ አልተጋሩም!**\n\nእባክዎ አዝራሩን ይጫኑ 👇" if lang == "am" else "❌ **Location not shared!**\n\nPlease click the button 👇",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, reg_w_location)
+            return
         
-        markup = types.ReplyKeyboardRemove()
-        msg = bot.send_message(chat_id, "🖼 **Step 5/7: Store Logo**\n\nSend a photo (or type 'skip'):", reply_markup=markup, parse_mode="Markdown")
-        bot.register_next_step_handler(msg, reg_w_logo)
+        reg_wizard_states[chat_id]["data"]["shop_lat"] = message.location.latitude
+        reg_wizard_states[chat_id]["data"]["shop_lng"] = message.location.longitude
+        
+        # Get categories
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT name_am, name_en FROM categories ORDER BY id")
+                categories = cursor.fetchall()
+        finally:
+            put_conn(conn)
+        
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        for cat_am, cat_en in categories:
+            label = cat_am if lang == "am" else cat_en
+            markup.add(types.InlineKeyboardButton(label, callback_data=f"regcat_{cat_am}"))
+        
+        msg = bot.send_message(
+            chat_id,
+            "📂 **ምድብ ይምረጡ**" if lang == "am" else "📂 **Select category**",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, reg_w_category)
 
-    def reg_w_logo(message):
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("regcat_"))
+    def reg_category_callback(call):
+        chat_id = call.message.chat.id
+        lang = get_user_lang(chat_id)
+        category = call.data.split("_")[1]
+        
+        if chat_id in reg_wizard_states:
+            reg_wizard_states[chat_id]["data"]["category"] = category
+        
+        bot.answer_callback_query(call.id, f"✅ {category}")
+        
+        msg = bot.send_message(
+            chat_id,
+            "🖼 **የሱቅ ፎቶ ያስገቡ**\n\n'ዝለል' ብለው መልእክት ማለፍ ይችላሉ" if lang == "am" else "🖼 **Enter store photo**\n\nType 'skip' to skip",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, reg_w_photo)
+
+    def reg_w_category(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
-        data = reg_wizard_states[chat_id]["data"]
+        
+        if chat_id in reg_wizard_states:
+            reg_wizard_states[chat_id]["data"]["category"] = message.text.strip()
+        
+        msg = bot.send_message(
+            chat_id,
+            "🖼 **የሱቅ ፎቶ ያስገቡ**\n\n'ዝለል' ብለው መልእክት ማለፍ ይችላሉ" if lang == "am" else "🖼 **Enter store photo**\n\nType 'skip' to skip",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, reg_w_photo)
+
+    def reg_w_photo(message):
+        chat_id = message.chat.id
+        lang = get_user_lang(chat_id)
         
         if message.photo:
-            data["shop_photo"] = message.photo[-1].file_id
+            reg_wizard_states[chat_id]["data"]["shop_photo"] = message.photo[-1].file_id
         else:
-            data["shop_photo"] = ""
+            reg_wizard_states[chat_id]["data"]["shop_photo"] = ""
         
-        msg = bot.send_message(chat_id, "🤖 **Step 6/7: Bot Token**\n\nEnter your Bot Token from @BotFather:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id,
+            "🔑 **የሱቅ ይለፍ ቃል ያስገቡ**\n\n⚠️ ቢያንስ 6 ቁምፊዎች" if lang == "am" else "🔑 **Enter store password**\n\n⚠️ Minimum 6 characters",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, reg_w_password)
+
+    def reg_w_password(message):
+        chat_id = message.chat.id
+        lang = get_user_lang(chat_id)
+        password = message.text.strip()
+        
+        if not is_valid_password(password):
+            msg = bot.reply_to(
+                message,
+                "❌ **የይለፍ ቃሉ በጣም አጭር ነው!**\n\nቢያንስ 6 ቁምፊዎች\n\nእንደገና ይሞክሩ:" if lang == "am" else "❌ **Password too short!**\n\nMinimum 6 characters.\n\nTry again:",
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, reg_w_password)
+            return
+        
+        reg_wizard_states[chat_id]["data"]["password"] = password
+        
+        msg = bot.send_message(
+            chat_id,
+            "🤖 **Bot API Token ያስገቡ**\n\nከ @BotFather ያገኙትን Token\n\nየሱቅዎ ቦት በራስ-ሰር ይገናኛል!" if lang == "am" else "🤖 **Enter Bot API Token**\n\nFrom @BotFather\n\nAuto-connect!",
+            parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, reg_w_token)
 
     def reg_w_token(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
-        tok = message.text.strip()
+        token = message.text.strip()
         
         try:
-            test_bot = telebot.TeleBot(tok)
+            test_bot = telebot.TeleBot(token)
             bot_info = test_bot.get_me()
         except:
-            bot.reply_to(message, "❌ Invalid token. Please start over with /start")
-            reg_wizard_states.pop(chat_id, None)
+            msg = bot.reply_to(
+                message,
+                "❌ **የተሳሳተ Token!**\n\nእንደገና ይሞክሩ:" if lang == "am" else "❌ **Invalid Token!**\n\nTry again:",
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, reg_w_token)
             return
         
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM stores WHERE token=%s", (tok,))
+                cursor.execute("SELECT 1 FROM stores WHERE token=%s", (token,))
                 if cursor.fetchone():
-                    bot.reply_to(message, "❌ Token already registered.")
-                    reg_wizard_states.pop(chat_id, None)
+                    msg = bot.reply_to(
+                        message,
+                        "❌ **ቀድሞውኑ ተመዝግቧል!**\n\nሌላ ቶከን ይጠቀሙ" if lang == "am" else "❌ **Already registered!**\n\nUse another token",
+                        parse_mode="Markdown"
+                    )
+                    bot.register_next_step_handler(msg, reg_w_token)
                     return
         finally:
             put_conn(conn)
         
-        reg_wizard_states[chat_id]["data"]["token"] = tok
+        reg_wizard_states[chat_id]["data"]["token"] = token
         reg_wizard_states[chat_id]["data"]["bot_username"] = bot_info.username
-        msg = bot.send_message(chat_id, f"✅ Token verified! (@{bot_info.username})\n\n📝 **Step 7/7: Description**\n\nEnter store description:", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, reg_w_description)
-
-    def reg_w_description(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
+        
         data = reg_wizard_states[chat_id]["data"]
-        data["shop_description"] = message.text.strip()
-        
-        # Ask for category
-        categories = STRINGS[lang]["categories"]
-        markup = types.InlineKeyboardMarkup(row_width=3)
-        for cat in categories[1:]:  # Skip "All"
-            markup.add(types.InlineKeyboardButton(cat, callback_data=f"regcat_{cat}"))
-        
-        msg = bot.send_message(chat_id, "📂 **Select Store Category:**", reply_markup=markup)
-        bot.register_next_step_handler(msg, lambda m: reg_w_final(m, data))
-
-    def reg_w_final(message, data):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        # If category selected via inline
-        if message.text in STRINGS[lang]["categories"]:
-            data["category"] = message.text
-        else:
-            data["category"] = "General"
+        h_pass, salt = hash_password(data["password"])
         
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute('''INSERT INTO stores
                                   (token, store_name, admin_id, username, owner_name, owner_phone,
-                                   area_text, shop_lat, shop_lng, shop_photo, shop_description, category, is_approved)
+                                   shop_lat, shop_lng, shop_photo, category, password_hash, password_salt, is_approved)
                                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0)''',
                                (data["token"], data["store_name"], chat_id, data["bot_username"],
-                                data["owner_name"], data["owner_phone"], data.get("area_text", ""),
-                                data.get("shop_lat"), data.get("shop_lng"), data.get("shop_photo", ""),
-                                data["shop_description"], data.get("category", "General")))
+                                data["owner_name"], data["owner_phone"], data.get("shop_lat"),
+                                data.get("shop_lng"), data.get("shop_photo", ""), data.get("category", "General"),
+                                h_pass, salt))
                 conn.commit()
         except Exception as e:
             bot.reply_to(message, f"❌ Error: {e}")
@@ -1257,378 +1227,221 @@ if CONTROL_BOT_TOKEN:
             put_conn(conn)
         
         reg_wizard_states.pop(chat_id, None)
-        bot.send_message(chat_id, "⏳ **Your application has been submitted.**\nWaiting for admin verification.", reply_markup=get_main_menu(lang), parse_mode="Markdown")
         
-        # Notify super admin
-        SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
+        bot.send_message(
+            chat_id,
+            "🎉 **ሱቅዎ ተመዝግቧል!**\n\n"
+            f"🏪 {data['store_name']}\n"
+            f"🤖 @{data['bot_username']}\n\n"
+            "✅ በራስ-ሰር ተገናኝቷል!\n"
+            "⏳ ለማጽደቅ ይጠብቁ።" if lang == "am" else 
+            "🎉 **Store registered!**\n\n"
+            f"🏪 {data['store_name']}\n"
+            f"🤖 @{data['bot_username']}\n\n"
+            "✅ Auto-connected!\n"
+            "⏳ Waiting for approval.",
+            reply_markup=get_main_menu(),
+            parse_mode="Markdown"
+        )
+        
         if SUPER_ADMIN_ID:
             try:
-                bot.send_message(SUPER_ADMIN_ID, f"🔔 **New Store Application!**\n\n🏪 {data['store_name']}\n👤 {data['owner_name']}\n📱 {data['owner_phone']}\n\nCheck 🛡 Verification")
+                bot.send_message(
+                    SUPER_ADMIN_ID,
+                    f"🔔 **አዲስ ሱቅ!**\n\n"
+                    f"🏪 {data['store_name']}\n"
+                    f"👤 {data['owner_name']}\n"
+                    f"📱 {data['owner_phone']}\n"
+                    f"🤖 @{data['bot_username']}"
+                )
             except:
                 pass
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("regcat_"))
-    def reg_category_callback(call):
-        chat_id = call.message.chat.id
-        category = call.data.split("_")[1]
-        
-        if chat_id in reg_wizard_states:
-            reg_wizard_states[chat_id]["data"]["category"] = category
-        
-        bot.answer_callback_query(call.id, f"✅ Category: {category}")
-        
-        # Continue to final step
-        data = reg_wizard_states[chat_id]["data"]
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''INSERT INTO stores
-                                  (token, store_name, admin_id, username, owner_name, owner_phone,
-                                   area_text, shop_lat, shop_lng, shop_photo, shop_description, category, is_approved)
-                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0)''',
-                               (data["token"], data["store_name"], chat_id, data["bot_username"],
-                                data["owner_name"], data["owner_phone"], data.get("area_text", ""),
-                                data.get("shop_lat"), data.get("shop_lng"), data.get("shop_photo", ""),
-                                data["shop_description"], category))
-                conn.commit()
-        except Exception as e:
-            bot.send_message(chat_id, f"❌ Error: {e}")
-            reg_wizard_states.pop(chat_id, None)
-            return
-        finally:
-            put_conn(conn)
-        
-        lang = get_user_lang(chat_id)
-        reg_wizard_states.pop(chat_id, None)
-        bot.send_message(chat_id, "⏳ **Application submitted!** Waiting for verification.", reply_markup=get_main_menu(lang), parse_mode="Markdown")
-
     # ============================================================
-    # 6.13 PROFILE
+    # 5.10 🤖 AI ፍለጋ
     # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["profile"])
-    def show_profile(message):
+    @bot.message_handler(func=lambda m: m.text == "🤖 AI ፍለጋ")
+    def ai_search_prompt(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT phone, lat, lng, username, full_name FROM customer_info WHERE chat_id=%s", (chat_id,))
-                info = cursor.fetchone()
-                
-                cursor.execute("SELECT COUNT(*) FROM orders WHERE customer_id=%s", (chat_id,))
-                order_count = cursor.fetchone()[0]
-                
-                cursor.execute("SELECT COUNT(*) FROM stores WHERE admin_id=%s", (chat_id,))
-                store_count = cursor.fetchone()[0]
-                
-                cursor.execute("SELECT points FROM user_points WHERE chat_id=%s", (chat_id,))
-                points_row = cursor.fetchone()
-                points = points_row[0] if points_row else 0
-        finally:
-            put_conn(conn)
-        
-        text = "👤 **My Profile**\n\n"
-        text += f"🆔 User ID: {chat_id}\n"
-        text += f"📱 Phone: {info[0] if info else 'Not set'}\n"
-        text += f"📍 Location: {'Set ✅' if info and info[1] else 'Not set'}\n"
-        text += f"👤 Name: {info[3] if info else 'N/A'}\n"
-        text += f"📦 Orders: {order_count}\n"
-        text += f"🏪 Stores: {store_count}\n"
-        text += f"🎯 Points: {points}\n"
-        
-        bot.send_message(chat_id, text, parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id,
+            "🔍 **ምን ይፈልጋሉ?**\n\nለምሳሌ: ልብስ፣ ጫማ፣ ሞባይል፣ ሱቅ ስም" if lang == "am" else "🔍 **What are you looking for?**\n\nExample: Fashion, Shoes, Mobile, Store name",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, ai_search_run)
 
-    # ============================================================
-    # 6.14 NOTIFICATIONS
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["notifications"])
-    def show_notifications(message):
+    def ai_search_run(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
+        query = message.text.strip()
         
         conn = get_safe_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute('''SELECT id, title, message, created_at, is_read
-                                  FROM notifications WHERE chat_id=%s
-                                  ORDER BY created_at DESC LIMIT 20''', (chat_id,))
-                notifs = cursor.fetchall()
+                cursor.execute('''SELECT s.id, s.store_name, s.category, s.area_text, s.shop_photo, s.rating, s.username
+                                  FROM stores s
+                                  WHERE s.is_approved=1 AND s.is_active=1
+                                  AND (s.store_name ILIKE %s OR s.category ILIKE %s)
+                                  LIMIT 10''', (f"%{query}%", f"%{query}%"))
+                stores = cursor.fetchall()
                 
-                # Mark as read
-                cursor.execute("UPDATE notifications SET is_read=1 WHERE chat_id=%s", (chat_id,))
-                conn.commit()
+                cursor.execute('''SELECT p.id, p.name_am, p.name_en, p.price, p.image_url, s.store_name, s.username
+                                  FROM products p JOIN stores s ON p.token = s.token
+                                  WHERE s.is_approved=1 AND s.is_active=1 AND p.stock > 0
+                                  AND (p.name_am ILIKE %s OR p.name_en ILIKE %s OR p.category ILIKE %s)
+                                  LIMIT 10''', (f"%{query}%", f"%{query}%", f"%{query}%"))
+                products = cursor.fetchall()
         finally:
             put_conn(conn)
         
-        if not notifs:
-            bot.send_message(chat_id, "🔔 No notifications.")
+        if not stores and not products:
+            if ai_model:
+                try:
+                    bot.send_chat_action(chat_id, 'typing')
+                    response = ai_model.generate_content(f"You are EthioSuq assistant. User searching for '{query}'. Suggest in {'Amharic' if lang == 'am' else 'English'}.")
+                    bot.reply_to(message, f"🤖 {response.text[:500]}")
+                    return
+                except:
+                    pass
+            bot.reply_to(message, "🔍 No results found.")
             return
         
-        text = "🔔 **Notifications:**\n\n"
-        for n_id, title, msg, created, is_read in notifs:
-            status = "📌" if is_read == 0 else "✅"
-            text += f"{status} **{title}**\n{msg[:100]}\n📅 {created}\n\n"
+        if stores:
+            text = "🏪 **Stores:**\n\n" if lang == "am" else "🏪 **Stores:**\n\n"
+            for store in stores[:5]:
+                store_id, name, category, area, photo, rating, username = store
+                stars = "⭐" * int(rating) if rating else ""
+                text += f"▪️ **{name}**\n"
+                text += f"   📂 {category or 'General'}\n"
+                text += f"   📍 {area or 'N/A'}\n"
+                text += f"   {stars}\n"
+                if username:
+                    text += f"   🤖 @{username}\n"
+                text += "\n"
+            bot.send_message(chat_id, text, parse_mode="Markdown")
         
-        bot.send_message(chat_id, text, parse_mode="Markdown")
+        if products:
+            text = "📦 **Products:**\n\n" if lang == "am" else "📦 **Products:**\n\n"
+            for p_id, name_am, name_en, price, image_url, store_name, username in products[:5]:
+                name = name_am if lang == "am" else name_en
+                text += f"▪️ **{name}**\n"
+                text += f"   💰 {price} ETB\n"
+                text += f"   🏪 {store_name}\n"
+                if username:
+                    text += f"   🤖 @{username}\n"
+                text += "\n"
+            bot.send_message(chat_id, text, parse_mode="Markdown")
 
     # ============================================================
-    # 6.15 SUPPORT
+    # 5.11 💬 እርዳታ ማእከል
     # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["support"])
-    def show_support(message):
+    @bot.message_handler(func=lambda m: m.text == "💬 እርዳታ ማእከል")
+    def support_center(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
         
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("📞 Contact Admin", callback_data="contact_admin"),
-            types.InlineKeyboardButton("❓ FAQ", callback_data="faq_support"),
-            types.InlineKeyboardButton("📝 Report Problem", callback_data="report_problem")
+            types.InlineKeyboardButton("📞 Contact Admin" if lang == "am" else "📞 Contact Admin", callback_data="support_admin"),
+            types.InlineKeyboardButton("❓ FAQ" if lang == "am" else "❓ FAQ", callback_data="support_faq"),
+            types.InlineKeyboardButton("📝 Report" if lang == "am" else "📝 Report", callback_data="support_report")
         )
-        bot.send_message(chat_id, "📞 **Support Center**\n\nChoose an option:", reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(
+            chat_id,
+            "💬 **Support Center**\n\nChoose an option:" if lang == "en" else "💬 **የእርዳታ ማእከል**\n\nአማራጭ ይምረጡ:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
 
-    @bot.callback_query_handler(func=lambda call: call.data in ["contact_admin", "faq_support", "report_problem"])
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("support_"))
     def support_actions(call):
         chat_id = call.message.chat.id
         lang = get_user_lang(chat_id)
+        action = call.data.split("_")[1]
         
-        if call.data == "contact_admin":
-            bot.send_message(chat_id, "📞 **Contact Admin**\n\nSend a message here and we'll get back to you soon.")
-        elif call.data == "faq_support":
-            faq = "❓ **FAQ**\n\n1. **How to register a store?**\n   Use '➕ Register Store' button\n\n2. **How to track orders?**\n   Go to '📦 My Orders'\n\n3. **How to get discounts?**\n   Check '🎁 Deals' for offers\n\n4. **How to earn points?**\n   Every 10 ETB spent = 1 point"
+        if action == "admin":
+            msg = bot.send_message(
+                chat_id,
+                "📞 Enter store name or username:" if lang == "en" else "📞 የሱቅ ስም ወይም የተጠቃሚ ስም ያስገቡ:",
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, support_contact_admin)
+        elif action == "faq":
+            faq = "❓ **FAQ**\n\n1. How to open a store?\n   → Click '📝 መዝገብ ማእከል'\n\n2. How to find products?\n   → Click '🤖 AI ፍለጋ'\n\n3. How to find stores?\n   → Type store name in '🤖 AI ፍለጋ'\n\n4. How to see store location?\n   → Shows in AI search results\n\n5. How to see store photo?\n   → Shows in AI search results"
             bot.send_message(chat_id, faq, parse_mode="Markdown")
-        elif call.data == "report_problem":
-            msg = bot.send_message(chat_id, "📝 **Report Problem**\n\nPlease describe your issue:")
-            bot.register_next_step_handler(msg, report_problem_submit)
+        elif action == "report":
+            msg = bot.send_message(
+                chat_id,
+                "📝 Describe your problem:" if lang == "en" else "📝 ችግሩን ይግለጹ:",
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, support_report_problem)
         bot.answer_callback_query(call.id)
 
-    def report_problem_submit(message):
+    def support_contact_admin(message):
         chat_id = message.chat.id
-        bot.send_message(chat_id, "✅ Thank you! Your report has been submitted. We'll look into it.")
+        query = message.text.strip()
+        lang = get_user_lang(chat_id)
         
-        # Notify admin
-        SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
+        conn = get_safe_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT store_name, admin_id, username FROM stores WHERE store_name ILIKE %s AND is_approved=1", (f"%{query}%",))
+                store = cursor.fetchone()
+        finally:
+            put_conn(conn)
+        
+        if store:
+            store_name, admin_id, username = store
+            text = f"✅ **{store_name}** found!\n🤖 @{username}" if lang == "en" else f"✅ **{store_name}** ተገኝቷል!\n🤖 @{username}"
+            if admin_id:
+                try:
+                    bot.send_message(admin_id, f"📞 Support request from {chat_id}\nStore: {store_name}")
+                except:
+                    pass
+            bot.send_message(chat_id, text + "\n\n📞 Admin notified!", parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, "❌ Store not found. Try again." if lang == "en" else "❌ ሱቅ አልተገኘም። እንደገና ይሞክሩ።")
+
+    def support_report_problem(message):
+        chat_id = message.chat.id
+        problem = message.text.strip()
+        lang = get_user_lang(chat_id)
+        
         if SUPER_ADMIN_ID:
             try:
-                bot.send_message(SUPER_ADMIN_ID, f"📝 **Problem Report**\n\nFrom: {chat_id}\n\n{message.text}")
+                bot.send_message(SUPER_ADMIN_ID, f"📝 **Problem Report**\n\nFrom: {chat_id}\n\n{problem}")
             except:
                 pass
+        
+        bot.send_message(chat_id, "✅ Report submitted! Admin will review." if lang == "en" else "✅ ሪፖርትዎ ተልኳል! አስተዳዳሪ ይመለከተዋል።")
 
     # ============================================================
-    # 6.16 COUPONS
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["coupons"])
-    def show_coupons(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute('''SELECT code, discount_percent, valid_until, store_token
-                                  FROM coupons WHERE %s != ANY(used_by) AND valid_until > NOW()''', (chat_id,))
-                coupons = cursor.fetchall()
-        finally:
-            put_conn(conn)
-        
-        if not coupons:
-            bot.send_message(chat_id, STRINGS[lang]["no_coupons"])
-            return
-        
-        text = "🎟 **My Coupons:**\n\n"
-        for code, discount, valid_until, store_token in coupons:
-            text += f"📌 **{code}** - {discount}% OFF\n🕐 Valid until: {valid_until}\n\n"
-        
-        bot.send_message(chat_id, text, parse_mode="Markdown")
-
-    # ============================================================
-    # 6.17 REWARDS
-    # ============================================================
-    @bot.message_handler(func=lambda m: m.text == STRINGS[get_user_lang(m.chat.id)]["rewards"])
-    def show_rewards(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT points FROM user_points WHERE chat_id=%s", (chat_id,))
-                row = cursor.fetchone()
-                points = row[0] if row else 0
-        finally:
-            put_conn(conn)
-        
-        text = f"🎯 **{STRINGS[lang]['rewards_title']}**\n\n"
-        text += f"📊 {STRINGS[lang]['points']}: {points}\n\n"
-        
-        if points >= 100:
-            text += "🏅 **Bronze Level** - 5% discount\n"
-        if points >= 250:
-            text += "🥈 **Silver Level** - 10% discount\n"
-        if points >= 500:
-            text += "🥇 **Gold Level** - 15% discount\n"
-        if points >= 1000:
-            text += "💎 **Platinum Level** - 20% discount\n"
-        
-        text += f"\n💡 Earn {10} points for every 100 ETB spent!"
-        
-        bot.send_message(chat_id, text, parse_mode="Markdown")
-
-    # ============================================================
-    # 6.18 HANDLE CONTACT & LOCATION SHARE
-    # ============================================================
-    @bot.message_handler(content_types=['contact'])
-    def handle_contact_share(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        if message.contact and message.contact.user_id == message.from_user.id:
-            save_customer_phone(chat_id, message.contact.phone_number)
-            bot.send_message(chat_id, STRINGS[lang]["phone_saved"])
-        
-        # Check if in checkout flow
-        if admin_states.get(chat_id, {}).get("state") == "PENDING_CHECKOUT":
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT phone, lat, lng FROM customer_info WHERE chat_id=%s", (chat_id,))
-                    row = cursor.fetchone()
-            finally:
-                put_conn(conn)
-            
-            if row and row[1] and row[2]:
-                lang = get_user_lang(chat_id)
-                finalize_checkout(chat_id, lang)
-            else:
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-                markup.add(types.KeyboardButton(STRINGS[lang]["location_share"], request_location=True))
-                bot.send_message(chat_id, STRINGS[lang]["location_required"], reply_markup=markup)
-
-    @bot.message_handler(content_types=['location'])
-    def handle_location_share(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        save_customer_location(chat_id, message.location.latitude, message.location.longitude)
-        bot.send_message(chat_id, STRINGS[lang]["location_saved"])
-        
-        # Check if in checkout flow
-        if admin_states.get(chat_id, {}).get("state") == "PENDING_CHECKOUT":
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT phone, lat, lng FROM customer_info WHERE chat_id=%s", (chat_id,))
-                    row = cursor.fetchone()
-            finally:
-                put_conn(conn)
-            
-            if row and row[0]:
-                lang = get_user_lang(chat_id)
-                finalize_checkout(chat_id, lang)
-            else:
-                markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-                markup.add(types.KeyboardButton(STRINGS[lang]["phone_share"], request_contact=True))
-                bot.send_message(chat_id, STRINGS[lang]["phone_required"], reply_markup=markup)
-
-    # ============================================================
-    # 6.19 PHOTO HANDLER (Receipt)
-    # ============================================================
-    @bot.message_handler(content_types=['photo'])
-    def handle_receipt(message):
-        chat_id = message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        state = admin_states.get(chat_id, {}).get("state", "")
-        
-        if state.startswith("AWAITING_RECEIPT_"):
-            order_id = int(state.split("_")[2])
-            
-            # Forward to store admin
-            conn = get_safe_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT token, total_price FROM orders WHERE id=%s", (order_id,))
-                    row = cursor.fetchone()
-                    if row:
-                        token, total = row
-                        cursor.execute("SELECT admin_id, store_name FROM stores WHERE token=%s", (token,))
-                        store = cursor.fetchone()
-                        if store:
-                            admin_id, store_name = store
-                            markup = types.InlineKeyboardMarkup()
-                            markup.add(
-                                types.InlineKeyboardButton("✅ Approve", callback_data=f"admin_approve_{order_id}"),
-                                types.InlineKeyboardButton("❌ Reject", callback_data=f"admin_reject_{order_id}")
-                            )
-                            bot.send_photo(admin_id, message.photo[-1].file_id, caption=f"🛒 **New Payment Receipt**\nOrder #{order_id}\nStore: {store_name}\nTotal: {total} ETB", reply_markup=markup, parse_mode="Markdown")
-                            
-                            bot.reply_to(message, "✅ Receipt forwarded for verification.")
-                            admin_states.pop(chat_id, None)
-            finally:
-                put_conn(conn)
-
-    # ============================================================
-    # 6.20 ADMIN CALLBACKS (Store approval from super admin)
-    # ============================================================
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_approve_") or call.data.startswith("admin_reject_"))
-    def admin_order_action(call):
-        chat_id = call.message.chat.id
-        lang = get_user_lang(chat_id)
-        
-        # Check if caller is super admin
-        SUPER_ADMIN_ID = int(os.environ.get("SUPER_ADMIN_ID", "0"))
-        if chat_id != SUPER_ADMIN_ID:
-            bot.answer_callback_query(call.id, "❌ Unauthorized")
-            return
-        
-        action, order_id = call.data.split("_")[1], int(call.data.split("_")[2])
-        
-        conn = get_safe_connection()
-        try:
-            with conn.cursor() as cursor:
-                if action == "approve":
-                    cursor.execute("UPDATE orders SET status_stage=1, status_am=%s, status_en=%s, status_or=%s WHERE id=%s",
-                                   (ORDER_STAGES["am"][1], ORDER_STAGES["en"][1], ORDER_STAGES["or"][1], order_id))
-                    conn.commit()
-                    bot.send_message(chat_id, f"✅ Order #{order_id} approved!")
-                else:
-                    cursor.execute("UPDATE orders SET status_stage=-1, status_am=%s, status_en=%s, status_or=%s WHERE id=%s",
-                                   ("❌ ውድቅ ተደርጓል", "❌ Rejected", "❌ Haqame", order_id))
-                    
-                    # Restore stock
-                    cursor.execute('''UPDATE products p SET stock = stock + oi.qty
-                                      FROM order_items oi
-                                      WHERE oi.order_id=%s AND oi.product_id = p.id''', (order_id,))
-                    conn.commit()
-                    bot.send_message(chat_id, f"❌ Order #{order_id} rejected!")
-        finally:
-            put_conn(conn)
-        
-        bot.answer_callback_query(call.id)
-
-    # ============================================================
-    # 6.21 FALLBACK
+    # 5.12 FALLBACK
     # ============================================================
     @bot.message_handler(func=lambda message: True)
     def fallback_handler(message):
         chat_id = message.chat.id
         lang = get_user_lang(chat_id)
         
-        # Use AI if available
         if ai_model:
             try:
                 bot.send_chat_action(chat_id, 'typing')
-                response = ai_model.generate_content(f"You are EthioSuq assistant. Answer in {lang}: {message.text}")
+                response = ai_model.generate_content(f"You are EthioSuq assistant. Answer in {'Amharic' if lang == 'am' else 'English'}: {message.text}")
                 bot.reply_to(message, f"🤖 {response.text[:500]}")
                 return
             except:
                 pass
         
-        bot.reply_to(message, "❓ Please use the menu buttons or type /start")
+        bot.reply_to(
+            message,
+            "📌 Please use the menu buttons below:" if lang == "en" else "📌 እባክዎ ከታች ካሉት አማራጮች ይምረጡ:",
+            reply_markup=get_main_menu()
+        )
 
     # ============================================================
-    # 6.22 START BOT
+    # 5.13 START BOT
     # ============================================================
     def _run_bot():
         while True:
@@ -1639,13 +1452,13 @@ if CONTROL_BOT_TOKEN:
                 time.sleep(5)
 
     threading.Thread(target=_run_bot, name="EthioSuqBot", daemon=True).start()
-    print("✅ EthioSuq Marketplace Bot is running!")
+    print("✅ EthioSuq Bot is running!")
 
 else:
     print("⚠️ CONTROL_BOT_TOKEN not set!")
 
 # ============================================================
-# 7. MAIN LOOP
+# 6. MAIN LOOP
 # ============================================================
 while True:
     time.sleep(3600)
